@@ -1,3 +1,4 @@
+import contextlib
 import os
 import secrets
 import shutil
@@ -5,6 +6,7 @@ import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
 
 from securefs import SecureFSWrapper
 
@@ -26,7 +28,7 @@ class TestSecureFSWrapperThreadSafety(unittest.TestCase):
     def tearDown(self):
         """Clean up after tests"""
         self.secure_fs.close()
-        if os.path.exists(self.test_dir):
+        if Path.exists(self.test_dir):
             shutil.rmtree(self.test_dir)
 
     def test_concurrent_writes_to_different_files(self):
@@ -64,7 +66,7 @@ class TestSecureFSWrapperThreadSafety(unittest.TestCase):
             results.append(result)
 
         threads = []
-        for i in range(10):
+        for _i in range(10):
             t = threading.Thread(target=read_file)
             threads.append(t)
             t.start()
@@ -87,11 +89,9 @@ class TestSecureFSWrapperThreadSafety(unittest.TestCase):
                 time.sleep(0.01)
 
         def reader():
-            for i in range(5):
-                try:
+            for _i in range(5):
+                with contextlib.suppress(FileNotFoundError):
                     self.secure_fs.read(path)
-                except FileNotFoundError:
-                    pass  # File might not exist yet
                 time.sleep(0.01)
 
         write_thread = threading.Thread(target=writer)

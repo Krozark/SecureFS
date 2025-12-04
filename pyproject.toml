@@ -100,27 +100,15 @@ target-version = "py38"
 
 # Fichiers/dossiers à exclure
 exclude = [
-    ".bzr",
-    ".direnv",
     ".eggs",
     ".git",
-    ".git-rewrite",
-    ".hg",
     ".mypy_cache",
-    ".nox",
-    ".pants.d",
-    ".pytype",
     ".ruff_cache",
-    ".svn",
     ".tox",
-    ".venv",
     "__pypackages__",
     "_build",
-    "buck-out",
     "build",
     "dist",
-    "node_modules",
-    "venv",
 ]
 
 [tool.ruff.lint]
@@ -157,7 +145,7 @@ ignore = [
     "S101",   # Use of assert (OK dans les tests)
     "S311",   # Random for crypto (nous utilisons secrets)
     "COM812", # Trailing comma (géré par le formatter)
-    "PTH123", # Pathlib (migration progressive)
+    "PTH123", "PTH118", "PTH110", "PTH101",  # Pathlib (migration progressive)
 ]
 
 # Règles spécifiques par fichier
