@@ -1,0 +1,300 @@
+# ============================================================================
+# FICHIER: pyproject.toml
+# Emplacement: pyproject.toml (racine du projet)
+# Description: Configuration complète avec Ruff (remplace Black, isort, flake8)
+# ============================================================================
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "securefs"
+version = "1.0.0"
+description = "A transparent, secure file storage system with encryption"
+readme = "README.md"
+requires-python = ">=3.8"
+license = {text = "BSD-2"}
+authors = [
+    {name = "Maxime Barbier", email = "maxime.barbier1991+securfs@gmail.com"}
+]
+maintainers = [
+    {name = "Maxime Barbier", email = "maxime.barbier1991+securfs@gmail.com"}
+]
+keywords = [
+    "encryption",
+    "file storage",
+    "security",
+    "cryptography",
+    "aes-gcm",
+    "secure storage",
+    "transparent encryption"
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security :: Cryptography",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Filesystems",
+    "Typing :: Typed",
+]
+
+# Dépendances de production
+dependencies = [
+    "cryptography>=41.0.0",
+]
+
+[project.optional-dependencies]
+# Dépendances de développement
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "pytest-xdist>=3.0.0",  # Tests parallèles
+    "ruff>=0.1.0",          # Linter et formatter tout-en-un
+    "mypy>=1.0.0",
+    "bandit>=1.7.0",        # Sécurité
+]
+
+all = [
+    "securefs[dev]",
+]
+
+[project.urls]
+Homepage = "https://github.com/Krozark/SecureFS"
+Repository = "https://github.com/Krozark/SecureFS"
+Changelog = "https://github.com/Krozark/SecureFS/blob/main/CHANGELOG.md"
+
+[project.scripts]
+# Scripts de ligne de commande (optionnel)
+# securefs-cli = "securefs.cli:main"
+
+# ============================================================================
+# Configuration setuptools
+# ============================================================================
+
+[tool.setuptools]
+packages = ["securefs"]
+
+[tool.setuptools.package-data]
+securefs = ["py.typed"]
+
+# ============================================================================
+# Ruff - Linter et Formatter tout-en-un
+# Remplace: Black, isort, flake8, pyupgrade, et plus
+# ============================================================================
+
+[tool.ruff]
+# Longueur de ligne (comme Black)
+line-length = 100
+
+# Version Python cible
+target-version = "py38"
+
+# Fichiers/dossiers à exclure
+exclude = [
+    ".bzr",
+    ".direnv",
+    ".eggs",
+    ".git",
+    ".git-rewrite",
+    ".hg",
+    ".mypy_cache",
+    ".nox",
+    ".pants.d",
+    ".pytype",
+    ".ruff_cache",
+    ".svn",
+    ".tox",
+    ".venv",
+    "__pypackages__",
+    "_build",
+    "buck-out",
+    "build",
+    "dist",
+    "node_modules",
+    "venv",
+]
+
+[tool.ruff.lint]
+# Activer ces groupes de règles
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "B",     # flake8-bugbear
+    "C4",    # flake8-comprehensions
+    "UP",    # pyupgrade
+    "ARG",   # flake8-unused-arguments
+    "SIM",   # flake8-simplify
+    "PIE",   # flake8-pie
+    "RET",   # flake8-return
+    "RSE",   # flake8-raise
+    "PTH",   # flake8-use-pathlib
+    "N",     # pep8-naming
+    "S",     # flake8-bandit (sécurité)
+    "A",     # flake8-builtins
+    "COM",   # flake8-commas
+    "DTZ",   # flake8-datetimez
+    "ICN",   # flake8-import-conventions
+    "G",     # flake8-logging-format
+    "INP",   # flake8-no-pep420
+    "Q",     # flake8-quotes
+    "T20",   # flake8-print
+]
+
+# Ignorer certaines règles spécifiques
+ignore = [
+    "E501",   # Line too long (géré par le formatter)
+    "S101",   # Use of assert (OK dans les tests)
+    "S311",   # Random for crypto (nous utilisons secrets)
+    "COM812", # Trailing comma (géré par le formatter)
+    "PTH123", # Pathlib (migration progressive)
+]
+
+# Règles spécifiques par fichier
+[tool.ruff.lint.per-file-ignores]
+"__init__.py" = ["F401"]  # Imports non utilisés OK dans __init__
+"tests/*.py" = ["S101", "ARG", "PLR2004"]  # Assert, args non utilisés OK dans tests
+
+# Configuration isort (intégré dans Ruff)
+[tool.ruff.lint.isort]
+known-first-party = ["securefs"]
+force-single-line = false
+lines-after-imports = 2
+
+# Configuration de formatage (comme Black)
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"
+
+# ============================================================================
+# pytest - Tests
+# ============================================================================
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--strict-config",
+    "--cov=securefs",
+    "--cov-report=html",
+    "--cov-report=term-missing",
+    "--cov-report=xml",
+    "--cov-fail-under=80",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "security: marks tests as security-related",
+]
+
+# ============================================================================
+# mypy - Vérification de types
+# ============================================================================
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = true
+disallow_untyped_decorators = false
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+follow_imports = "normal"
+ignore_missing_imports = true
+pretty = true
+show_column_numbers = true
+show_error_codes = true
+show_error_context = true
+
+# ============================================================================
+# coverage - Couverture de code
+# ============================================================================
+
+[tool.coverage.run]
+source = ["securefs"]
+branch = true
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/__pycache__/*",
+    "*/site-packages/*",
+]
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if settings.DEBUG",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if 0:",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+
+[tool.coverage.html]
+directory = "htmlcov"
+
+# ============================================================================
+# bandit - Sécurité (complémentaire à Ruff)
+# ============================================================================
+
+[tool.bandit]
+exclude_dirs = ["tests", "examples"]
+skips = ["B101"]  # Skip assert_used dans les tests
+
+# ============================================================================
+# COMMANDES DE DÉVELOPPEMENT
+# ============================================================================
+
+# Installation en mode développement:
+# pip install -e ".[dev]"
+
+# Linter et formatter avec Ruff:
+# ruff check .                    # Vérifier (linting)
+# ruff check --fix .              # Corriger automatiquement
+# ruff format .                   # Formater (comme Black)
+# ruff check --fix . && ruff format .  # Tout en une fois
+
+# Tests:
+# pytest                          # Tests simples
+# pytest -n auto                  # Tests parallèles
+# pytest --cov-report=html        # Avec rapport HTML
+
+# Vérification des types:
+# mypy securefs/
+
+# Scan de sécurité:
+# bandit -r securefs/
+
+# Build:
+# python -m build
+
+# Commande complète avant commit:
+# ruff check --fix . && ruff format . && mypy securefs/ && pytest
