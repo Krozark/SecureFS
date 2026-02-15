@@ -54,7 +54,7 @@ ruff format .
 ruff check --fix . && ruff format .
 ```
 
-Line length: 100 characters. Target Python version: 3.8+.
+Line length: 100 characters. Target Python version: 3.11+.
 
 ## Type Checking
 

@@ -10,10 +10,8 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from threading import Lock
-from typing import Dict, List, Optional, Tuple
 
 from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from .exceptions import EncryptionError, FileCorruptionError, SecureFSError
@@ -72,7 +70,7 @@ class SecureFSWrapper:
         self._lock = Lock()
 
         # Simple cache (path -> bytes)
-        self._cache: Dict[str, bytes] = {}
+        self._cache: dict[str, bytes] = {}
 
         # Create storage directory if it doesn't exist
         self.storage_root.mkdir(parents=True, exist_ok=True)
@@ -155,7 +153,7 @@ class SecureFSWrapper:
         # A nonce of all zeros indicates plaintext storage
         return nonce != b"\x00" * 12
 
-    def _encrypt_with_km(self, data: bytes) -> Tuple[bytes, bytes]:
+    def _encrypt_with_km(self, data: bytes) -> tuple[bytes, bytes]:
         """
         Encrypt data with master key (KM) using AES-256-GCM
         If encryption is disabled, returns data as-is with zero nonce
@@ -172,9 +170,7 @@ class SecureFSWrapper:
 
         try:
             nonce = secrets.token_bytes(12)
-            cipher = Cipher(
-                algorithms.AES(self.master_key), modes.GCM(nonce), backend=default_backend()
-            )
+            cipher = Cipher(algorithms.AES(self.master_key), modes.GCM(nonce))
             encryptor = cipher.encryptor()
 
             ciphertext = encryptor.update(data) + encryptor.finalize()
@@ -209,9 +205,7 @@ class SecureFSWrapper:
             ciphertext = ciphertext_with_tag[:-16]
             tag = ciphertext_with_tag[-16:]
 
-            cipher = Cipher(
-                algorithms.AES(self.master_key), modes.GCM(nonce, tag), backend=default_backend()
-            )
+            cipher = Cipher(algorithms.AES(self.master_key), modes.GCM(nonce, tag))
             decryptor = cipher.decryptor()
 
             return decryptor.update(ciphertext) + decryptor.finalize()
@@ -222,7 +216,7 @@ class SecureFSWrapper:
         except Exception as e:
             raise EncryptionError(f"Failed to decrypt with master key: {e}") from e
 
-    def _encrypt_file_content(self, content: bytes, kf: bytes) -> Tuple[bytes, bytes]:
+    def _encrypt_file_content(self, content: bytes, kf: bytes) -> tuple[bytes, bytes]:
         """
         Encrypt file content with file key (KF)
         If encryption is disabled, returns content as-is with zero nonce
@@ -240,7 +234,7 @@ class SecureFSWrapper:
 
         try:
             nonce = secrets.token_bytes(12)
-            cipher = Cipher(algorithms.AES(kf), modes.GCM(nonce), backend=default_backend())
+            cipher = Cipher(algorithms.AES(kf), modes.GCM(nonce))
             encryptor = cipher.encryptor()
 
             ciphertext = encryptor.update(content) + encryptor.finalize()
@@ -276,7 +270,7 @@ class SecureFSWrapper:
             ciphertext = ciphertext_with_tag[:-16]
             tag = ciphertext_with_tag[-16:]
 
-            cipher = Cipher(algorithms.AES(kf), modes.GCM(nonce, tag), backend=default_backend())
+            cipher = Cipher(algorithms.AES(kf), modes.GCM(nonce, tag))
             decryptor = cipher.decryptor()
 
             return decryptor.update(ciphertext) + decryptor.finalize()
@@ -534,7 +528,7 @@ class SecureFSWrapper:
             except Exception as e:
                 raise SecureFSError(f"Failed to delete file {logical_path}: {e}") from e
 
-    def list_files(self, prefix: str = "") -> List[str]:
+    def list_files(self, prefix: str = "") -> list[str]:
         """
         List all files (optionally with a prefix)
 
@@ -561,7 +555,7 @@ class SecureFSWrapper:
 
             return [row[0] for row in cursor.fetchall()]
 
-    def get_info(self, logical_path: str) -> Optional[Dict]:
+    def get_info(self, logical_path: str) -> dict | None:
         """
         Get information about a file
 
@@ -596,7 +590,7 @@ class SecureFSWrapper:
                 "modified_at": row[3],
             }
 
-    def verify_all_files(self) -> Dict[str, bool]:
+    def verify_all_files(self) -> dict[str, bool]:
         """
         Verify integrity of all files in the system
 
@@ -617,7 +611,7 @@ class SecureFSWrapper:
 
         return results
 
-    def get_statistics(self) -> Dict:
+    def get_statistics(self) -> dict:
         """
         Get system statistics
 
@@ -643,7 +637,7 @@ class SecureFSWrapper:
                 "encryption_enabled": self.encryption_enabled,
             }
 
-    def clear_cache(self, path: Optional[str] = None):
+    def clear_cache(self, path: str | None = None):
         """
         Clear the in-memory cache
 
@@ -685,7 +679,7 @@ class SecureFSWrapper:
         with self._lock:
             return sum(len(content) for content in self._cache.values())
 
-    def get_cached_paths(self) -> List[str]:
+    def get_cached_paths(self) -> list[str]:
         """
         Get list of all paths currently in cache
 

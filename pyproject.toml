@@ -13,7 +13,7 @@ name = "securefs"
 version = "1.0.0"
 description = "A transparent, secure file storage system with encryption"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [
     {name = "Maxime Barbier", email = "maxime.barbier1991+securfs@gmail.com"}
@@ -36,11 +36,9 @@ classifiers = [
     "License :: OSI Approved :: MIT License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Security :: Cryptography",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: System :: Filesystems",
@@ -96,7 +94,7 @@ securefs = ["py.typed"]
 line-length = 100
 
 # Version Python cible
-target-version = "py38"
+target-version = "py311"
 
 # Fichiers/dossiers à exclure
 exclude = [
@@ -196,7 +194,7 @@ markers = [
 # ============================================================================
 
 [tool.mypy]
-python_version = "3.8"
+python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false
