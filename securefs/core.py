@@ -10,7 +10,7 @@ import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from threading import Lock
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.backends import default_backend
@@ -116,12 +116,12 @@ class SecureFSWrapper:
 
             # Create indexes for better performance
             cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_files_hash 
+                CREATE INDEX IF NOT EXISTS idx_files_hash
                 ON files(file_hash)
             """)
 
             cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_files_modified 
+                CREATE INDEX IF NOT EXISTS idx_files_modified
                 ON files(modified_at)
             """)
 
@@ -155,7 +155,7 @@ class SecureFSWrapper:
         # A nonce of all zeros indicates plaintext storage
         return nonce != b"\x00" * 12
 
-    def _encrypt_with_km(self, data: bytes) -> tuple[bytes, bytes]:
+    def _encrypt_with_km(self, data: bytes) -> Tuple[bytes, bytes]:
         """
         Encrypt data with master key (KM) using AES-256-GCM
         If encryption is disabled, returns data as-is with zero nonce
@@ -182,7 +182,7 @@ class SecureFSWrapper:
 
             return ciphertext_with_tag, nonce
         except Exception as e:
-            raise EncryptionError(f"Failed to encrypt with master key: {e}")
+            raise EncryptionError(f"Failed to encrypt with master key: {e}") from e
 
     def _decrypt_with_km(self, ciphertext_with_tag: bytes, nonce: bytes) -> bytes:
         """
@@ -215,14 +215,14 @@ class SecureFSWrapper:
             decryptor = cipher.decryptor()
 
             return decryptor.update(ciphertext) + decryptor.finalize()
-        except InvalidTag:
+        except InvalidTag as e:
             raise EncryptionError(
                 "Decryption failed: Invalid authentication tag (wrong key or corrupted data)"
-            )
+            ) from e
         except Exception as e:
-            raise EncryptionError(f"Failed to decrypt with master key: {e}")
+            raise EncryptionError(f"Failed to decrypt with master key: {e}") from e
 
-    def _encrypt_file_content(self, content: bytes, kf: bytes) -> tuple[bytes, bytes]:
+    def _encrypt_file_content(self, content: bytes, kf: bytes) -> Tuple[bytes, bytes]:
         """
         Encrypt file content with file key (KF)
         If encryption is disabled, returns content as-is with zero nonce
@@ -248,7 +248,7 @@ class SecureFSWrapper:
 
             return ciphertext_with_tag, nonce
         except Exception as e:
-            raise EncryptionError(f"Failed to encrypt file content: {e}")
+            raise EncryptionError(f"Failed to encrypt file content: {e}") from e
 
     def _decrypt_file_content(self, ciphertext_with_tag: bytes, nonce: bytes, kf: bytes) -> bytes:
         """
@@ -280,10 +280,10 @@ class SecureFSWrapper:
             decryptor = cipher.decryptor()
 
             return decryptor.update(ciphertext) + decryptor.finalize()
-        except InvalidTag:
-            raise FileCorruptionError("File decryption failed: Data may be corrupted")
+        except InvalidTag as e:
+            raise FileCorruptionError("File decryption failed: Data may be corrupted") from e
         except Exception as e:
-            raise EncryptionError(f"Failed to decrypt file content: {e}")
+            raise EncryptionError(f"Failed to decrypt file content: {e}") from e
 
     def _generate_dat_filename(self, logical_path: str) -> str:
         """
@@ -352,6 +352,9 @@ class SecureFSWrapper:
             # Encrypt KF with KM
             kf_encrypted, kf_nonce = self._encrypt_with_km(kf)
 
+            # Track whether this is an overwrite for proper rollback
+            is_overwrite = dat_path.exists()
+
             # Use transaction for atomicity
             with self._get_connection() as conn:
                 cursor = conn.cursor()
@@ -366,12 +369,20 @@ class SecureFSWrapper:
                     # Atomic rename
                     temp_path.replace(dat_path)
 
-                    # Update database
+                    # Update database, preserving created_at on overwrite
                     cursor.execute(
                         """
-                        INSERT OR REPLACE INTO files 
-                        (logical_path, kf_encrypted, kf_nonce, file_hash, file_size, dat_filename, modified_at)
-                        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        INSERT INTO files
+                        (logical_path, kf_encrypted, kf_nonce, file_hash, file_size,
+                         dat_filename, created_at, modified_at)
+                        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        ON CONFLICT(logical_path) DO UPDATE SET
+                            kf_encrypted = excluded.kf_encrypted,
+                            kf_nonce = excluded.kf_nonce,
+                            file_hash = excluded.file_hash,
+                            file_size = excluded.file_size,
+                            dat_filename = excluded.dat_filename,
+                            modified_at = CURRENT_TIMESTAMP
                     """,
                         (
                             logical_path,
@@ -390,10 +401,10 @@ class SecureFSWrapper:
                         self._cache[logical_path] = plaintext_bytes
 
                 except Exception as e:
-                    # Rollback: remove .dat file if it was created
-                    if dat_path.exists():
+                    # Rollback: only remove .dat file if this was a new file
+                    if not is_overwrite and dat_path.exists():
                         dat_path.unlink()
-                    raise SecureFSError(f"Failed to write file {logical_path}: {e}")
+                    raise SecureFSError(f"Failed to write file {logical_path}: {e}") from e
 
     def read(self, logical_path: str, skip_verification: bool = False) -> bytes:
         """
@@ -411,18 +422,18 @@ class SecureFSWrapper:
             FileCorruptionError: If integrity check fails
             EncryptionError: If decryption fails
         """
-        # Check cache first
-        if self.cache_enabled and logical_path in self._cache:
-            return self._cache[logical_path]
-
         with self._lock:
+            # Check cache first (inside lock for thread safety)
+            if self.cache_enabled and logical_path in self._cache:
+                return self._cache[logical_path]
+
             with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 cursor.execute(
                     """
                     SELECT kf_encrypted, kf_nonce, dat_filename, file_hash
-                    FROM files 
+                    FROM files
                     WHERE logical_path = ?
                 """,
                     (logical_path,),
@@ -452,11 +463,14 @@ class SecureFSWrapper:
             plaintext_bytes = self._decrypt_file_content(content_encrypted, content_nonce, kf)
 
             # Verify integrity if enabled
-            if self.verify_integrity and not skip_verification:
-                if not self._verify_file_integrity(plaintext_bytes, expected_hash):
-                    raise FileCorruptionError(
-                        f"Integrity check failed for {logical_path}: hash mismatch"
-                    )
+            if (
+                self.verify_integrity
+                and not skip_verification
+                and not self._verify_file_integrity(plaintext_bytes, expected_hash)
+            ):
+                raise FileCorruptionError(
+                    f"Integrity check failed for {logical_path}: hash mismatch"
+                )
 
             # Update cache if enabled
             if self.cache_enabled:
@@ -502,14 +516,14 @@ class SecureFSWrapper:
             dat_filename = row[0]
 
             try:
-                # Delete from database first
-                cursor.execute("DELETE FROM files WHERE logical_path = ?", (logical_path,))
-                conn.commit()
-
-                # Delete .dat file
+                # Delete .dat file first (can still rollback DB if this fails)
                 dat_path = self.storage_root / dat_filename
                 if dat_path.exists():
                     dat_path.unlink()
+
+                # Delete from database
+                cursor.execute("DELETE FROM files WHERE logical_path = ?", (logical_path,))
+                conn.commit()
 
                 # Remove from cache
                 if self.cache_enabled and logical_path in self._cache:
@@ -518,7 +532,7 @@ class SecureFSWrapper:
                 return True
 
             except Exception as e:
-                raise SecureFSError(f"Failed to delete file {logical_path}: {e}")
+                raise SecureFSError(f"Failed to delete file {logical_path}: {e}") from e
 
     def list_files(self, prefix: str = "") -> List[str]:
         """
@@ -536,8 +550,8 @@ class SecureFSWrapper:
             if prefix:
                 cursor.execute(
                     """
-                    SELECT logical_path FROM files 
-                    WHERE logical_path LIKE ? 
+                    SELECT logical_path FROM files
+                    WHERE logical_path LIKE ?
                     ORDER BY logical_path
                 """,
                     (f"{prefix}%",),
@@ -562,8 +576,8 @@ class SecureFSWrapper:
 
             cursor.execute(
                 """
-                SELECT file_size, file_hash, created_at, modified_at 
-                FROM files 
+                SELECT file_size, file_hash, created_at, modified_at
+                FROM files
                 WHERE logical_path = ?
             """,
                 (logical_path,),

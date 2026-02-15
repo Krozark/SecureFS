@@ -14,7 +14,7 @@ version = "1.0.0"
 description = "A transparent, secure file storage system with encryption"
 readme = "README.md"
 requires-python = ">=3.8"
-license = {text = "BSD-2"}
+license = {text = "MIT"}
 authors = [
     {name = "Maxime Barbier", email = "maxime.barbier1991+securfs@gmail.com"}
 ]

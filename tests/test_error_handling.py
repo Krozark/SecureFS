@@ -78,6 +78,9 @@ class TestSecureFSWrapperErrorHandling(unittest.TestCase):
         if os.name == "nt":
             self.skipTest("Permission test not applicable on Windows")
 
+        if os.getuid() == 0:
+            self.skipTest("Permission test not applicable when running as root")
+
         path = "/test/file.txt"
         self.secure_fs.write(path, b"content")
 

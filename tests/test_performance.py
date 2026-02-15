@@ -92,4 +92,3 @@ class TestSecureFSWrapperPerformance(unittest.TestCase):
 
         self.assertEqual(len(files), num_files)
         self.assertLess(list_time, 5)  # Should list 200 files in under 5 seconds
-
