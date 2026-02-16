@@ -1,4 +1,3 @@
-import os
 import secrets
 import shutil
 import sqlite3
@@ -14,9 +13,9 @@ class TestSecureFSWrapperNoEncryption(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures with encryption disabled"""
-        self.test_dir = tempfile.mkdtemp()
-        self.db_path = os.path.join(self.test_dir, "test_index.db")
-        self.storage_root = os.path.join(self.test_dir, "test_storage")
+        self.test_dir = Path(tempfile.mkdtemp())
+        self.db_path = self.test_dir / "test_index.db"
+        self.storage_root = self.test_dir / "test_storage"
         self.master_key = secrets.token_bytes(32)
 
         # Suppress the encryption warning for tests
@@ -34,7 +33,7 @@ class TestSecureFSWrapperNoEncryption(unittest.TestCase):
     def tearDown(self):
         """Clean up after tests"""
         self.secure_fs.close()
-        if os.path.exists(self.test_dir):
+        if self.test_dir.exists():
             shutil.rmtree(self.test_dir)
 
     def test_write_and_read_work_without_encryption(self):
@@ -58,7 +57,7 @@ class TestSecureFSWrapperNoEncryption(unittest.TestCase):
         dat_files = list(Path(self.storage_root).glob("*.dat"))
         self.assertEqual(len(dat_files), 1)
 
-        with open(dat_files[0], "rb") as f:
+        with dat_files[0].open("rb") as f:
             raw_content = f.read()
 
         # Content should be found in the raw file (after nonce)
@@ -108,14 +107,14 @@ class TestSecureFSWrapperNoEncryption(unittest.TestCase):
 
         # Corrupt the file
         dat_files = list(Path(self.storage_root).glob("*.dat"))
-        with open(dat_files[0], "rb") as f:
+        with dat_files[0].open("rb") as f:
             data = bytearray(f.read())
 
         # Modify content
         if len(data) > 20:
             data[20] ^= 0xFF
 
-        with open(dat_files[0], "wb") as f:
+        with dat_files[0].open("wb") as f:
             f.write(data)
 
         # Should detect corruption
@@ -130,8 +129,8 @@ class TestSecureFSWrapperNoEncryption(unittest.TestCase):
         # Create new instance with encryption enabled
         encrypted_fs = SecureFSWrapper(
             master_key=self.master_key,
-            db_path=os.path.join(self.test_dir, "encrypted_index.db"),
-            storage_root=os.path.join(self.test_dir, "encrypted_storage"),
+            db_path=self.test_dir / "encrypted_index.db",
+            storage_root=self.test_dir / "encrypted_storage",
             encryption_enabled=True,
         )
 
@@ -140,13 +139,13 @@ class TestSecureFSWrapperNoEncryption(unittest.TestCase):
 
         # Verify plaintext file is plaintext
         dat_files_plain = list(Path(self.storage_root).glob("*.dat"))
-        with open(dat_files_plain[0], "rb") as f:
+        with dat_files_plain[0].open("rb") as f:
             plain_raw = f.read()
         self.assertIn(b"plaintext", plain_raw)
 
         # Verify encrypted file is encrypted
         dat_files_enc = list(Path(encrypted_fs.storage_root).glob("*.dat"))
-        with open(dat_files_enc[0], "rb") as f:
+        with dat_files_enc[0].open("rb") as f:
             enc_raw = f.read()
         self.assertNotIn(b"ciphertext", enc_raw)
 
@@ -163,8 +162,8 @@ class TestSecureFSWrapperNoEncryption(unittest.TestCase):
             # Create instance with encryption disabled
             test_fs = SecureFSWrapper(
                 master_key=secrets.token_bytes(32),
-                db_path=os.path.join(self.test_dir, "warn_test.db"),
-                storage_root=os.path.join(self.test_dir, "warn_storage"),
+                db_path=self.test_dir / "warn_test.db",
+                storage_root=self.test_dir / "warn_storage",
                 encryption_enabled=False,
             )
 
@@ -237,10 +236,10 @@ class TestSecureFSWrapperNoEncryption(unittest.TestCase):
 
         # Verify the new file is encrypted on disk
         # Find the newest .dat file
-        dat_files = sorted(Path(self.storage_root).glob("*.dat"), key=os.path.getmtime)
+        dat_files = sorted(Path(self.storage_root).glob("*.dat"), key=lambda p: p.stat().st_mtime)
         newest_dat = dat_files[-1]
 
-        with open(newest_dat, "rb") as f:
+        with newest_dat.open("rb") as f:
             raw = f.read()
 
         self.assertNotIn(b"This is encrypted", raw)
@@ -270,7 +269,7 @@ class TestSecureFSWrapperNoEncryption(unittest.TestCase):
 
         # Verify it's encrypted on disk
         dat_files = list(Path(self.storage_root).glob("*.dat"))
-        with open(dat_files[0], "rb") as f:
+        with dat_files[0].open("rb") as f:
             raw = f.read()
         self.assertNotIn(b"This is encrypted content", raw)
 
@@ -293,10 +292,10 @@ class TestSecureFSWrapperNoEncryption(unittest.TestCase):
         plain_fs.write(path2, b"This is plaintext")
 
         # Verify new file is plaintext
-        dat_files = sorted(Path(self.storage_root).glob("*.dat"), key=os.path.getmtime)
+        dat_files = sorted(Path(self.storage_root).glob("*.dat"), key=lambda p: p.stat().st_mtime)
         newest_dat = dat_files[-1]
 
-        with open(newest_dat, "rb") as f:
+        with newest_dat.open("rb") as f:
             raw = f.read()
         self.assertIn(b"This is plaintext", raw)
 

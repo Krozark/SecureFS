@@ -2,9 +2,9 @@
 Advanced usage examples for SecureFS
 """
 
-import os
 import shutil
 import threading
+from pathlib import Path
 
 from securefs import FileCorruptionError, SecureFSWrapper
 from securefs.utils import generate_master_key
@@ -12,12 +12,13 @@ from securefs.utils import generate_master_key
 
 def cleanup():
     """Clean up example files"""
-    for path in ["./advanced_index.db", "./advanced_data"]:
-        if os.path.exists(path):
-            if os.path.isfile(path):
-                os.remove(path)
+    for path_str in ["./advanced_index.db", "./advanced_data"]:
+        p = Path(path_str)
+        if p.exists():
+            if p.is_file():
+                p.unlink()
             else:
-                shutil.rmtree(path)
+                shutil.rmtree(p)
 
 
 def example_caching():
@@ -136,14 +137,12 @@ def example_error_handling():
     fs_wrong.close()
 
     # Simulate file corruption
-    from pathlib import Path
-
     dat_files = list(Path("./advanced_data").glob("*.dat"))
     if dat_files:
-        with open(dat_files[0], "rb") as f:
+        with dat_files[0].open("rb") as f:
             data = bytearray(f.read())
         data[20] ^= 0xFF  # Corrupt one byte
-        with open(dat_files[0], "wb") as f:
+        with dat_files[0].open("wb") as f:
             f.write(data)
 
         try:

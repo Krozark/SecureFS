@@ -13,8 +13,8 @@ name = "securefs"
 version = "1.0.0"
 description = "A transparent, secure file storage system with encryption"
 readme = "README.md"
-requires-python = ">=3.8"
-license = {text = "BSD-2"}
+requires-python = ">=3.11"
+license = {text = "BSD-2-Clause"}
 authors = [
     {name = "Maxime Barbier", email = "maxime.barbier1991+securfs@gmail.com"}
 ]
@@ -33,14 +33,12 @@ keywords = [
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: BSD License",
     "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Security :: Cryptography",
     "Topic :: Software Development :: Libraries :: Python Modules",
     "Topic :: System :: Filesystems",
@@ -96,7 +94,7 @@ securefs = ["py.typed"]
 line-length = 100
 
 # Version Python cible
-target-version = "py38"
+target-version = "py311"
 
 # Fichiers/dossiers à exclure
 exclude = [
@@ -145,13 +143,13 @@ ignore = [
     "S101",   # Use of assert (OK dans les tests)
     "S311",   # Random for crypto (nous utilisons secrets)
     "COM812", # Trailing comma (géré par le formatter)
-    "PTH123", "PTH118", "PTH110", "PTH101",  # Pathlib (migration progressive)
 ]
 
 # Règles spécifiques par fichier
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]  # Imports non utilisés OK dans __init__
 "tests/*.py" = ["S101", "ARG", "PLR2004"]  # Assert, args non utilisés OK dans tests
+"examples/*.py" = ["T201", "INP001"]  # print() and namespace OK in examples
 
 # Configuration isort (intégré dans Ruff)
 [tool.ruff.lint.isort]
@@ -196,7 +194,7 @@ markers = [
 # ============================================================================
 
 [tool.mypy]
-python_version = "3.8"
+python_version = "3.11"
 warn_return_any = true
 warn_unused_configs = true
 disallow_untyped_defs = false

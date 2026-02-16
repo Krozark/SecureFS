@@ -1,9 +1,9 @@
-import os
 import secrets
 import shutil
 import tempfile
 import time
 import unittest
+from pathlib import Path
 
 from securefs import SecureFSWrapper
 
@@ -13,9 +13,9 @@ class TestSecureFSWrapperPerformance(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures"""
-        self.test_dir = tempfile.mkdtemp()
-        self.db_path = os.path.join(self.test_dir, "test_index.db")
-        self.storage_root = os.path.join(self.test_dir, "test_storage")
+        self.test_dir = Path(tempfile.mkdtemp())
+        self.db_path = self.test_dir / "test_index.db"
+        self.storage_root = self.test_dir / "test_storage"
         self.master_key = secrets.token_bytes(32)
 
         self.secure_fs = SecureFSWrapper(
@@ -28,7 +28,7 @@ class TestSecureFSWrapperPerformance(unittest.TestCase):
     def tearDown(self):
         """Clean up after tests"""
         self.secure_fs.close()
-        if os.path.exists(self.test_dir):
+        if self.test_dir.exists():
             shutil.rmtree(self.test_dir)
 
     def test_cache_improves_read_performance(self):
@@ -92,4 +92,3 @@ class TestSecureFSWrapperPerformance(unittest.TestCase):
 
         self.assertEqual(len(files), num_files)
         self.assertLess(list_time, 5)  # Should list 200 files in under 5 seconds
-

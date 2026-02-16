@@ -1,5 +1,3 @@
-
-import os
 import secrets
 import shutil
 import tempfile
@@ -14,9 +12,9 @@ class TestSecureFSWrapperCache(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures with cache enabled"""
-        self.test_dir = tempfile.mkdtemp()
-        self.db_path = os.path.join(self.test_dir, "test_index.db")
-        self.storage_root = os.path.join(self.test_dir, "test_storage")
+        self.test_dir = Path(tempfile.mkdtemp())
+        self.db_path = self.test_dir / "test_index.db"
+        self.storage_root = self.test_dir / "test_storage"
         self.master_key = secrets.token_bytes(32)
 
         self.secure_fs = SecureFSWrapper(
@@ -29,7 +27,7 @@ class TestSecureFSWrapperCache(unittest.TestCase):
     def tearDown(self):
         """Clean up after tests"""
         self.secure_fs.close()
-        if os.path.exists(self.test_dir):
+        if self.test_dir.exists():
             shutil.rmtree(self.test_dir)
 
     def test_cache_stores_content_after_write(self):

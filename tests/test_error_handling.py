@@ -4,6 +4,7 @@ import shutil
 import sqlite3
 import tempfile
 import unittest
+from pathlib import Path
 
 from securefs import EncryptionError, SecureFSError, SecureFSWrapper
 
@@ -13,9 +14,9 @@ class TestSecureFSWrapperErrorHandling(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures"""
-        self.test_dir = tempfile.mkdtemp()
-        self.db_path = os.path.join(self.test_dir, "test_index.db")
-        self.storage_root = os.path.join(self.test_dir, "test_storage")
+        self.test_dir = Path(tempfile.mkdtemp())
+        self.db_path = self.test_dir / "test_index.db"
+        self.storage_root = self.test_dir / "test_storage"
         self.master_key = secrets.token_bytes(32)
 
         self.secure_fs = SecureFSWrapper(
@@ -25,7 +26,7 @@ class TestSecureFSWrapperErrorHandling(unittest.TestCase):
     def tearDown(self):
         """Clean up after tests"""
         self.secure_fs.close()
-        if os.path.exists(self.test_dir):
+        if self.test_dir.exists():
             shutil.rmtree(self.test_dir)
 
     def test_read_with_wrong_master_key_raises_encryption_error(self):
@@ -48,7 +49,7 @@ class TestSecureFSWrapperErrorHandling(unittest.TestCase):
         self.secure_fs.write("/file1.txt", b"content1")
 
         # Corrupt the database by writing invalid data
-        with open(self.db_path, "ab") as f:
+        with self.db_path.open("ab") as f:
             f.write(b"CORRUPTED DATA" * 100)
 
         # Creating a new instance should handle gracefully or fail predictably
@@ -78,19 +79,22 @@ class TestSecureFSWrapperErrorHandling(unittest.TestCase):
         if os.name == "nt":
             self.skipTest("Permission test not applicable on Windows")
 
+        if os.getuid() == 0:
+            self.skipTest("Permission test not applicable when running as root")
+
         path = "/test/file.txt"
         self.secure_fs.write(path, b"content")
 
         # Make storage directory read-only
-        os.chmod(self.storage_root, 0o444)
+        self.storage_root.chmod(0o444)
 
         try:
             # Write should fail
-            with self.assertRaises(Exception):
+            with self.assertRaises((PermissionError, SecureFSError)):
                 self.secure_fs.write("/test/new.txt", b"new content")
         finally:
             # Restore permissions for cleanup
-            os.chmod(self.storage_root, 0o755)
+            self.storage_root.chmod(0o755)
 
     def test_close_method_cleanup(self):
         """Test that close method properly cleans up"""

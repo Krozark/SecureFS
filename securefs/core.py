@@ -5,15 +5,15 @@ This module contains the main SecureFSWrapper class that provides
 transparent encrypted file storage.
 """
 
+import hmac
+import os
 import secrets
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from threading import Lock
-from typing import Dict, List, Optional
 
 from cryptography.exceptions import InvalidTag
-from cryptography.hazmat.backends import default_backend
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from .exceptions import EncryptionError, FileCorruptionError, SecureFSError
@@ -23,11 +23,13 @@ from .utils import compute_hash
 class SecureFSWrapper:
     """Enhanced transparent wrapper for encrypted file system"""
 
+    _ZERO_NONCE = b"\x00" * 12
+
     def __init__(
         self,
         master_key: bytes,
-        db_path: str,
-        storage_root: str,
+        db_path: str | os.PathLike[str],
+        storage_root: str | os.PathLike[str],
         verify_integrity: bool = True,
         cache_enabled: bool = False,
         encryption_enabled: bool = True,
@@ -51,7 +53,7 @@ class SecureFSWrapper:
             raise ValueError("Master key must be 32 bytes (256 bits)")
 
         self.master_key = master_key
-        self.db_path = db_path
+        self.db_path = Path(db_path)
         self.storage_root = Path(storage_root)
         self.verify_integrity = verify_integrity
         self.cache_enabled = cache_enabled
@@ -72,7 +74,7 @@ class SecureFSWrapper:
         self._lock = Lock()
 
         # Simple cache (path -> bytes)
-        self._cache: Dict[str, bytes] = {}
+        self._cache: dict[str, bytes] = {}
 
         # Create storage directory if it doesn't exist
         self.storage_root.mkdir(parents=True, exist_ok=True)
@@ -85,9 +87,7 @@ class SecureFSWrapper:
         """Context manager for database connections with proper cleanup"""
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         try:
-            # Enable foreign keys and WAL mode for better concurrency
             conn.execute("PRAGMA foreign_keys = ON")
-            conn.execute("PRAGMA journal_mode = WAL")
             yield conn
         except Exception:
             conn.rollback()
@@ -98,6 +98,9 @@ class SecureFSWrapper:
     def _init_database(self):
         """Initialize SQLite database structure with proper indexes"""
         with self._get_connection() as conn:
+            # WAL mode is persistent across connections; set once here
+            conn.execute("PRAGMA journal_mode = WAL")
+
             cursor = conn.cursor()
 
             # Main files table
@@ -116,12 +119,12 @@ class SecureFSWrapper:
 
             # Create indexes for better performance
             cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_files_hash 
+                CREATE INDEX IF NOT EXISTS idx_files_hash
                 ON files(file_hash)
             """)
 
             cursor.execute("""
-                CREATE INDEX IF NOT EXISTS idx_files_modified 
+                CREATE INDEX IF NOT EXISTS idx_files_modified
                 ON files(modified_at)
             """)
 
@@ -153,7 +156,7 @@ class SecureFSWrapper:
             True if file is encrypted, False if plaintext
         """
         # A nonce of all zeros indicates plaintext storage
-        return nonce != b"\x00" * 12
+        return nonce != self._ZERO_NONCE
 
     def _encrypt_with_km(self, data: bytes) -> tuple[bytes, bytes]:
         """
@@ -168,13 +171,11 @@ class SecureFSWrapper:
         """
         if not self.encryption_enabled:
             # Return data as-is with a zero nonce to mark as plaintext
-            return data, b"\x00" * 12
+            return data, self._ZERO_NONCE
 
         try:
             nonce = secrets.token_bytes(12)
-            cipher = Cipher(
-                algorithms.AES(self.master_key), modes.GCM(nonce), backend=default_backend()
-            )
+            cipher = Cipher(algorithms.AES(self.master_key), modes.GCM(nonce))
             encryptor = cipher.encryptor()
 
             ciphertext = encryptor.update(data) + encryptor.finalize()
@@ -182,7 +183,7 @@ class SecureFSWrapper:
 
             return ciphertext_with_tag, nonce
         except Exception as e:
-            raise EncryptionError(f"Failed to encrypt with master key: {e}")
+            raise EncryptionError(f"Failed to encrypt with master key: {e}") from e
 
     def _decrypt_with_km(self, ciphertext_with_tag: bytes, nonce: bytes) -> bytes:
         """
@@ -209,18 +210,17 @@ class SecureFSWrapper:
             ciphertext = ciphertext_with_tag[:-16]
             tag = ciphertext_with_tag[-16:]
 
-            cipher = Cipher(
-                algorithms.AES(self.master_key), modes.GCM(nonce, tag), backend=default_backend()
-            )
+            cipher = Cipher(algorithms.AES(self.master_key), modes.GCM(nonce, tag))
             decryptor = cipher.decryptor()
 
-            return decryptor.update(ciphertext) + decryptor.finalize()
-        except InvalidTag:
+            result: bytes = decryptor.update(ciphertext) + decryptor.finalize()
+            return result
+        except InvalidTag as e:
             raise EncryptionError(
                 "Decryption failed: Invalid authentication tag (wrong key or corrupted data)"
-            )
+            ) from e
         except Exception as e:
-            raise EncryptionError(f"Failed to decrypt with master key: {e}")
+            raise EncryptionError(f"Failed to decrypt with master key: {e}") from e
 
     def _encrypt_file_content(self, content: bytes, kf: bytes) -> tuple[bytes, bytes]:
         """
@@ -236,11 +236,11 @@ class SecureFSWrapper:
         """
         if not self.encryption_enabled:
             # Return content as-is with a zero nonce to mark as plaintext
-            return content, b"\x00" * 12
+            return content, self._ZERO_NONCE
 
         try:
             nonce = secrets.token_bytes(12)
-            cipher = Cipher(algorithms.AES(kf), modes.GCM(nonce), backend=default_backend())
+            cipher = Cipher(algorithms.AES(kf), modes.GCM(nonce))
             encryptor = cipher.encryptor()
 
             ciphertext = encryptor.update(content) + encryptor.finalize()
@@ -248,7 +248,7 @@ class SecureFSWrapper:
 
             return ciphertext_with_tag, nonce
         except Exception as e:
-            raise EncryptionError(f"Failed to encrypt file content: {e}")
+            raise EncryptionError(f"Failed to encrypt file content: {e}") from e
 
     def _decrypt_file_content(self, ciphertext_with_tag: bytes, nonce: bytes, kf: bytes) -> bytes:
         """
@@ -276,14 +276,15 @@ class SecureFSWrapper:
             ciphertext = ciphertext_with_tag[:-16]
             tag = ciphertext_with_tag[-16:]
 
-            cipher = Cipher(algorithms.AES(kf), modes.GCM(nonce, tag), backend=default_backend())
+            cipher = Cipher(algorithms.AES(kf), modes.GCM(nonce, tag))
             decryptor = cipher.decryptor()
 
-            return decryptor.update(ciphertext) + decryptor.finalize()
-        except InvalidTag:
-            raise FileCorruptionError("File decryption failed: Data may be corrupted")
+            result: bytes = decryptor.update(ciphertext) + decryptor.finalize()
+            return result
+        except InvalidTag as e:
+            raise FileCorruptionError("File decryption failed: Data may be corrupted") from e
         except Exception as e:
-            raise EncryptionError(f"Failed to decrypt file content: {e}")
+            raise EncryptionError(f"Failed to decrypt file content: {e}") from e
 
     def _generate_dat_filename(self, logical_path: str) -> str:
         """
@@ -322,7 +323,7 @@ class SecureFSWrapper:
             True if hashes match, False otherwise
         """
         actual_hash = self._compute_content_hash(content)
-        return actual_hash == expected_hash
+        return hmac.compare_digest(actual_hash, expected_hash)
 
     def write(self, logical_path: str, plaintext_bytes: bytes) -> None:
         """
@@ -352,6 +353,9 @@ class SecureFSWrapper:
             # Encrypt KF with KM
             kf_encrypted, kf_nonce = self._encrypt_with_km(kf)
 
+            # Track whether this is an overwrite for proper rollback
+            is_overwrite = dat_path.exists()
+
             # Use transaction for atomicity
             with self._get_connection() as conn:
                 cursor = conn.cursor()
@@ -359,19 +363,27 @@ class SecureFSWrapper:
                 try:
                     # Write .dat file first (can rollback DB if this fails)
                     temp_path = dat_path.with_suffix(".tmp")
-                    with open(temp_path, "wb") as f:
+                    with temp_path.open("wb") as f:
                         f.write(content_nonce)
                         f.write(content_encrypted)
 
                     # Atomic rename
                     temp_path.replace(dat_path)
 
-                    # Update database
+                    # Update database, preserving created_at on overwrite
                     cursor.execute(
                         """
-                        INSERT OR REPLACE INTO files 
-                        (logical_path, kf_encrypted, kf_nonce, file_hash, file_size, dat_filename, modified_at)
-                        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+                        INSERT INTO files
+                        (logical_path, kf_encrypted, kf_nonce, file_hash, file_size,
+                         dat_filename, created_at, modified_at)
+                        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                        ON CONFLICT(logical_path) DO UPDATE SET
+                            kf_encrypted = excluded.kf_encrypted,
+                            kf_nonce = excluded.kf_nonce,
+                            file_hash = excluded.file_hash,
+                            file_size = excluded.file_size,
+                            dat_filename = excluded.dat_filename,
+                            modified_at = CURRENT_TIMESTAMP
                     """,
                         (
                             logical_path,
@@ -390,10 +402,10 @@ class SecureFSWrapper:
                         self._cache[logical_path] = plaintext_bytes
 
                 except Exception as e:
-                    # Rollback: remove .dat file if it was created
-                    if dat_path.exists():
+                    # Rollback: only remove .dat file if this was a new file
+                    if not is_overwrite and dat_path.exists():
                         dat_path.unlink()
-                    raise SecureFSError(f"Failed to write file {logical_path}: {e}")
+                    raise SecureFSError(f"Failed to write file {logical_path}: {e}") from e
 
     def read(self, logical_path: str, skip_verification: bool = False) -> bytes:
         """
@@ -411,18 +423,18 @@ class SecureFSWrapper:
             FileCorruptionError: If integrity check fails
             EncryptionError: If decryption fails
         """
-        # Check cache first
-        if self.cache_enabled and logical_path in self._cache:
-            return self._cache[logical_path]
-
         with self._lock:
+            # Check cache first (inside lock for thread safety)
+            if self.cache_enabled and logical_path in self._cache:
+                return self._cache[logical_path]
+
             with self._get_connection() as conn:
                 cursor = conn.cursor()
 
                 cursor.execute(
                     """
                     SELECT kf_encrypted, kf_nonce, dat_filename, file_hash
-                    FROM files 
+                    FROM files
                     WHERE logical_path = ?
                 """,
                     (logical_path,),
@@ -444,7 +456,7 @@ class SecureFSWrapper:
             if not dat_path.exists():
                 raise FileNotFoundError(f"Missing .dat file: {dat_filename}")
 
-            with open(dat_path, "rb") as f:
+            with dat_path.open("rb") as f:
                 content_nonce = f.read(12)
                 content_encrypted = f.read()
 
@@ -452,11 +464,14 @@ class SecureFSWrapper:
             plaintext_bytes = self._decrypt_file_content(content_encrypted, content_nonce, kf)
 
             # Verify integrity if enabled
-            if self.verify_integrity and not skip_verification:
-                if not self._verify_file_integrity(plaintext_bytes, expected_hash):
-                    raise FileCorruptionError(
-                        f"Integrity check failed for {logical_path}: hash mismatch"
-                    )
+            if (
+                self.verify_integrity
+                and not skip_verification
+                and not self._verify_file_integrity(plaintext_bytes, expected_hash)
+            ):
+                raise FileCorruptionError(
+                    f"Integrity check failed for {logical_path}: hash mismatch"
+                )
 
             # Update cache if enabled
             if self.cache_enabled:
@@ -502,14 +517,14 @@ class SecureFSWrapper:
             dat_filename = row[0]
 
             try:
-                # Delete from database first
-                cursor.execute("DELETE FROM files WHERE logical_path = ?", (logical_path,))
-                conn.commit()
-
-                # Delete .dat file
+                # Delete .dat file first (can still rollback DB if this fails)
                 dat_path = self.storage_root / dat_filename
                 if dat_path.exists():
                     dat_path.unlink()
+
+                # Delete from database
+                cursor.execute("DELETE FROM files WHERE logical_path = ?", (logical_path,))
+                conn.commit()
 
                 # Remove from cache
                 if self.cache_enabled and logical_path in self._cache:
@@ -518,9 +533,9 @@ class SecureFSWrapper:
                 return True
 
             except Exception as e:
-                raise SecureFSError(f"Failed to delete file {logical_path}: {e}")
+                raise SecureFSError(f"Failed to delete file {logical_path}: {e}") from e
 
-    def list_files(self, prefix: str = "") -> List[str]:
+    def list_files(self, prefix: str = "") -> list[str]:
         """
         List all files (optionally with a prefix)
 
@@ -534,20 +549,22 @@ class SecureFSWrapper:
             cursor = conn.cursor()
 
             if prefix:
+                # Escape LIKE wildcards so prefix is matched literally
+                escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
                 cursor.execute(
                     """
-                    SELECT logical_path FROM files 
-                    WHERE logical_path LIKE ? 
+                    SELECT logical_path FROM files
+                    WHERE logical_path LIKE ? ESCAPE '\\'
                     ORDER BY logical_path
                 """,
-                    (f"{prefix}%",),
+                    (f"{escaped}%",),
                 )
             else:
                 cursor.execute("SELECT logical_path FROM files ORDER BY logical_path")
 
             return [row[0] for row in cursor.fetchall()]
 
-    def get_info(self, logical_path: str) -> Optional[Dict]:
+    def get_info(self, logical_path: str) -> dict | None:
         """
         Get information about a file
 
@@ -562,8 +579,8 @@ class SecureFSWrapper:
 
             cursor.execute(
                 """
-                SELECT file_size, file_hash, created_at, modified_at 
-                FROM files 
+                SELECT file_size, file_hash, created_at, modified_at
+                FROM files
                 WHERE logical_path = ?
             """,
                 (logical_path,),
@@ -582,7 +599,7 @@ class SecureFSWrapper:
                 "modified_at": row[3],
             }
 
-    def verify_all_files(self) -> Dict[str, bool]:
+    def verify_all_files(self) -> dict[str, bool]:
         """
         Verify integrity of all files in the system
 
@@ -603,7 +620,7 @@ class SecureFSWrapper:
 
         return results
 
-    def get_statistics(self) -> Dict:
+    def get_statistics(self) -> dict:
         """
         Get system statistics
 
@@ -613,15 +630,15 @@ class SecureFSWrapper:
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
-            cursor.execute("SELECT COUNT(*), SUM(file_size) FROM files")
-            count, total_size = cursor.fetchone()
-
-            cursor.execute("SELECT MIN(created_at), MAX(modified_at) FROM files")
-            oldest, newest = cursor.fetchone()
+            cursor.execute(
+                "SELECT COUNT(*), COALESCE(SUM(file_size), 0),"
+                " MIN(created_at), MAX(modified_at) FROM files"
+            )
+            count, total_size, oldest, newest = cursor.fetchone()
 
             return {
                 "total_files": count or 0,
-                "total_size_bytes": total_size or 0,
+                "total_size_bytes": total_size,
                 "oldest_file": oldest,
                 "newest_modification": newest,
                 "cache_enabled": self.cache_enabled,
@@ -629,7 +646,7 @@ class SecureFSWrapper:
                 "encryption_enabled": self.encryption_enabled,
             }
 
-    def clear_cache(self, path: Optional[str] = None):
+    def clear_cache(self, path: str | None = None):
         """
         Clear the in-memory cache
 
@@ -671,7 +688,7 @@ class SecureFSWrapper:
         with self._lock:
             return sum(len(content) for content in self._cache.values())
 
-    def get_cached_paths(self) -> List[str]:
+    def get_cached_paths(self) -> list[str]:
         """
         Get list of all paths currently in cache
 
