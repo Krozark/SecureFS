@@ -90,7 +90,7 @@ class TestSecureFSWrapperErrorHandling(unittest.TestCase):
 
         try:
             # Write should fail
-            with self.assertRaises(Exception):
+            with self.assertRaises((PermissionError, SecureFSError)):
                 self.secure_fs.write("/test/new.txt", b"new content")
         finally:
             # Restore permissions for cleanup

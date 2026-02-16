@@ -5,6 +5,7 @@ This module contains the main SecureFSWrapper class that provides
 transparent encrypted file storage.
 """
 
+import hmac
 import os
 import secrets
 import sqlite3
@@ -21,6 +22,8 @@ from .utils import compute_hash
 
 class SecureFSWrapper:
     """Enhanced transparent wrapper for encrypted file system"""
+
+    _ZERO_NONCE = b"\x00" * 12
 
     def __init__(
         self,
@@ -84,9 +87,7 @@ class SecureFSWrapper:
         """Context manager for database connections with proper cleanup"""
         conn = sqlite3.connect(self.db_path, timeout=30.0)
         try:
-            # Enable foreign keys and WAL mode for better concurrency
             conn.execute("PRAGMA foreign_keys = ON")
-            conn.execute("PRAGMA journal_mode = WAL")
             yield conn
         except Exception:
             conn.rollback()
@@ -97,6 +98,9 @@ class SecureFSWrapper:
     def _init_database(self):
         """Initialize SQLite database structure with proper indexes"""
         with self._get_connection() as conn:
+            # WAL mode is persistent across connections; set once here
+            conn.execute("PRAGMA journal_mode = WAL")
+
             cursor = conn.cursor()
 
             # Main files table
@@ -152,7 +156,7 @@ class SecureFSWrapper:
             True if file is encrypted, False if plaintext
         """
         # A nonce of all zeros indicates plaintext storage
-        return nonce != b"\x00" * 12
+        return nonce != self._ZERO_NONCE
 
     def _encrypt_with_km(self, data: bytes) -> tuple[bytes, bytes]:
         """
@@ -167,7 +171,7 @@ class SecureFSWrapper:
         """
         if not self.encryption_enabled:
             # Return data as-is with a zero nonce to mark as plaintext
-            return data, b"\x00" * 12
+            return data, self._ZERO_NONCE
 
         try:
             nonce = secrets.token_bytes(12)
@@ -209,7 +213,8 @@ class SecureFSWrapper:
             cipher = Cipher(algorithms.AES(self.master_key), modes.GCM(nonce, tag))
             decryptor = cipher.decryptor()
 
-            return decryptor.update(ciphertext) + decryptor.finalize()
+            result: bytes = decryptor.update(ciphertext) + decryptor.finalize()
+            return result
         except InvalidTag as e:
             raise EncryptionError(
                 "Decryption failed: Invalid authentication tag (wrong key or corrupted data)"
@@ -231,7 +236,7 @@ class SecureFSWrapper:
         """
         if not self.encryption_enabled:
             # Return content as-is with a zero nonce to mark as plaintext
-            return content, b"\x00" * 12
+            return content, self._ZERO_NONCE
 
         try:
             nonce = secrets.token_bytes(12)
@@ -274,7 +279,8 @@ class SecureFSWrapper:
             cipher = Cipher(algorithms.AES(kf), modes.GCM(nonce, tag))
             decryptor = cipher.decryptor()
 
-            return decryptor.update(ciphertext) + decryptor.finalize()
+            result: bytes = decryptor.update(ciphertext) + decryptor.finalize()
+            return result
         except InvalidTag as e:
             raise FileCorruptionError("File decryption failed: Data may be corrupted") from e
         except Exception as e:
@@ -317,7 +323,7 @@ class SecureFSWrapper:
             True if hashes match, False otherwise
         """
         actual_hash = self._compute_content_hash(content)
-        return actual_hash == expected_hash
+        return hmac.compare_digest(actual_hash, expected_hash)
 
     def write(self, logical_path: str, plaintext_bytes: bytes) -> None:
         """
@@ -543,13 +549,15 @@ class SecureFSWrapper:
             cursor = conn.cursor()
 
             if prefix:
+                # Escape LIKE wildcards so prefix is matched literally
+                escaped = prefix.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
                 cursor.execute(
                     """
                     SELECT logical_path FROM files
-                    WHERE logical_path LIKE ?
+                    WHERE logical_path LIKE ? ESCAPE '\\'
                     ORDER BY logical_path
                 """,
-                    (f"{prefix}%",),
+                    (f"{escaped}%",),
                 )
             else:
                 cursor.execute("SELECT logical_path FROM files ORDER BY logical_path")
@@ -622,15 +630,15 @@ class SecureFSWrapper:
         with self._get_connection() as conn:
             cursor = conn.cursor()
 
-            cursor.execute("SELECT COUNT(*), SUM(file_size) FROM files")
-            count, total_size = cursor.fetchone()
-
-            cursor.execute("SELECT MIN(created_at), MAX(modified_at) FROM files")
-            oldest, newest = cursor.fetchone()
+            cursor.execute(
+                "SELECT COUNT(*), COALESCE(SUM(file_size), 0),"
+                " MIN(created_at), MAX(modified_at) FROM files"
+            )
+            count, total_size, oldest, newest = cursor.fetchone()
 
             return {
                 "total_files": count or 0,
-                "total_size_bytes": total_size or 0,
+                "total_size_bytes": total_size,
                 "oldest_file": oldest,
                 "newest_modification": newest,
                 "cache_enabled": self.cache_enabled,

@@ -149,6 +149,7 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "__init__.py" = ["F401"]  # Imports non utilisés OK dans __init__
 "tests/*.py" = ["S101", "ARG", "PLR2004"]  # Assert, args non utilisés OK dans tests
+"examples/*.py" = ["T201", "INP001"]  # print() and namespace OK in examples
 
 # Configuration isort (intégré dans Ruff)
 [tool.ruff.lint.isort]

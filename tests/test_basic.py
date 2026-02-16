@@ -1,3 +1,4 @@
+import contextlib
 import secrets
 import shutil
 import sqlite3
@@ -522,10 +523,8 @@ class TestSecureFSWrapperBasic(unittest.TestCase):
         ]
 
         for attempt in injection_attempts:
-            try:
+            with contextlib.suppress(Exception):
                 self.secure_fs.write(attempt, b"Injection attempt")
-            except Exception:
-                pass
 
         self.assertTrue(self.secure_fs.exists("/legitimate/file.txt"))
         content = self.secure_fs.read("/legitimate/file.txt")
