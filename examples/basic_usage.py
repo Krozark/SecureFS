@@ -2,7 +2,8 @@
 Basic usage example for SecureFS
 """
 
-import os
+import shutil
+from pathlib import Path
 
 from securefs import SecureFSWrapper
 from securefs.utils import generate_master_key
@@ -64,12 +65,12 @@ def main():
     print("\\n✅ Example completed!")
 
     # Clean up example files
-    import shutil
-
-    if os.path.exists("./example_index.db"):
-        os.remove("./example_index.db")
-    if os.path.exists("./example_data"):
-        shutil.rmtree("./example_data")
+    db = Path("./example_index.db")
+    data = Path("./example_data")
+    if db.exists():
+        db.unlink()
+    if data.exists():
+        shutil.rmtree(data)
 
 
 if __name__ == "__main__":

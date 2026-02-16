@@ -1,4 +1,3 @@
-import os
 import secrets
 import shutil
 import sqlite3
@@ -14,9 +13,9 @@ class TestSecureFSWrapperBasic(unittest.TestCase):
 
     def setUp(self):
         """Set up test fixtures before each test"""
-        self.test_dir = tempfile.mkdtemp()
-        self.db_path = os.path.join(self.test_dir, "test_index.db")
-        self.storage_root = os.path.join(self.test_dir, "test_storage")
+        self.test_dir = Path(tempfile.mkdtemp())
+        self.db_path = self.test_dir / "test_index.db"
+        self.storage_root = self.test_dir / "test_storage"
         self.master_key = secrets.token_bytes(32)
 
         self.secure_fs = SecureFSWrapper(
@@ -30,7 +29,7 @@ class TestSecureFSWrapperBasic(unittest.TestCase):
     def tearDown(self):
         """Clean up after each test"""
         self.secure_fs.close()
-        if os.path.exists(self.test_dir):
+        if self.test_dir.exists():
             shutil.rmtree(self.test_dir)
 
     # ========================
@@ -39,12 +38,12 @@ class TestSecureFSWrapperBasic(unittest.TestCase):
 
     def test_initialization_creates_directories(self):
         """Test that initialization creates necessary directories"""
-        self.assertTrue(os.path.exists(self.storage_root))
-        self.assertTrue(os.path.isdir(self.storage_root))
+        self.assertTrue(self.storage_root.exists())
+        self.assertTrue(self.storage_root.is_dir())
 
     def test_initialization_creates_database(self):
         """Test that initialization creates SQLite database with indexes"""
-        self.assertTrue(os.path.exists(self.db_path))
+        self.assertTrue(self.db_path.exists())
 
         with sqlite3.connect(self.db_path) as conn:
             cursor = conn.cursor()
@@ -208,14 +207,14 @@ class TestSecureFSWrapperBasic(unittest.TestCase):
 
         # Corrupt the .dat file
         dat_files = list(Path(self.storage_root).glob("*.dat"))
-        with open(dat_files[0], "rb") as f:
+        with dat_files[0].open("rb") as f:
             data = bytearray(f.read())
 
         # Flip some bits in the encrypted content (after nonce)
         if len(data) > 20:
             data[20] ^= 0xFF
 
-        with open(dat_files[0], "wb") as f:
+        with dat_files[0].open("wb") as f:
             f.write(data)
 
         # Should raise FileCorruptionError
@@ -257,11 +256,11 @@ class TestSecureFSWrapperBasic(unittest.TestCase):
 
         # Corrupt one file
         dat_files = list(Path(self.storage_root).glob("*.dat"))
-        with open(dat_files[0], "rb") as f:
+        with dat_files[0].open("rb") as f:
             data = bytearray(f.read())
         if len(data) > 20:
             data[20] ^= 0xFF
-        with open(dat_files[0], "wb") as f:
+        with dat_files[0].open("wb") as f:
             f.write(data)
 
         results = self.secure_fs.verify_all_files()
@@ -443,7 +442,7 @@ class TestSecureFSWrapperBasic(unittest.TestCase):
         self.secure_fs.write(path, plaintext)
 
         dat_files = list(Path(self.storage_root).glob("*.dat"))
-        with open(dat_files[0], "rb") as f:
+        with dat_files[0].open("rb") as f:
             raw_content = f.read()
 
         self.assertNotIn(plaintext, raw_content)
@@ -455,18 +454,18 @@ class TestSecureFSWrapperBasic(unittest.TestCase):
 
         self.secure_fs.write(path, content)
         dat_files = list(Path(self.storage_root).glob("*.dat"))
-        with open(dat_files[0], "rb") as f:
+        with dat_files[0].open("rb") as f:
             ciphertext1 = f.read()
 
         new_key = secrets.token_bytes(32)
-        new_db = os.path.join(self.test_dir, "new_index.db")
-        new_storage = os.path.join(self.test_dir, "new_storage")
+        new_db = self.test_dir / "new_index.db"
+        new_storage = self.test_dir / "new_storage"
 
         secure_fs2 = SecureFSWrapper(master_key=new_key, db_path=new_db, storage_root=new_storage)
 
         secure_fs2.write(path, content)
         dat_files2 = list(Path(new_storage).glob("*.dat"))
-        with open(dat_files2[0], "rb") as f:
+        with dat_files2[0].open("rb") as f:
             ciphertext2 = f.read()
 
         self.assertNotEqual(ciphertext1, ciphertext2)

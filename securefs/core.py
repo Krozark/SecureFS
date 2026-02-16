@@ -5,6 +5,7 @@ This module contains the main SecureFSWrapper class that provides
 transparent encrypted file storage.
 """
 
+import os
 import secrets
 import sqlite3
 from contextlib import contextmanager
@@ -24,8 +25,8 @@ class SecureFSWrapper:
     def __init__(
         self,
         master_key: bytes,
-        db_path: str,
-        storage_root: str,
+        db_path: str | os.PathLike[str],
+        storage_root: str | os.PathLike[str],
         verify_integrity: bool = True,
         cache_enabled: bool = False,
         encryption_enabled: bool = True,
@@ -49,7 +50,7 @@ class SecureFSWrapper:
             raise ValueError("Master key must be 32 bytes (256 bits)")
 
         self.master_key = master_key
-        self.db_path = db_path
+        self.db_path = Path(db_path)
         self.storage_root = Path(storage_root)
         self.verify_integrity = verify_integrity
         self.cache_enabled = cache_enabled
@@ -356,7 +357,7 @@ class SecureFSWrapper:
                 try:
                     # Write .dat file first (can rollback DB if this fails)
                     temp_path = dat_path.with_suffix(".tmp")
-                    with open(temp_path, "wb") as f:
+                    with temp_path.open("wb") as f:
                         f.write(content_nonce)
                         f.write(content_encrypted)
 
@@ -449,7 +450,7 @@ class SecureFSWrapper:
             if not dat_path.exists():
                 raise FileNotFoundError(f"Missing .dat file: {dat_filename}")
 
-            with open(dat_path, "rb") as f:
+            with dat_path.open("rb") as f:
                 content_nonce = f.read(12)
                 content_encrypted = f.read()
 

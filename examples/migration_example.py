@@ -2,8 +2,8 @@
 Migration example: switching between encrypted and plaintext modes
 """
 
-import os
 import shutil
+from pathlib import Path
 
 from securefs import SecureFSWrapper
 from securefs.utils import generate_master_key
@@ -11,10 +11,12 @@ from securefs.utils import generate_master_key
 
 def cleanup():
     """Clean up example files"""
-    if os.path.exists("./migration_index.db"):
-        os.remove("./migration_index.db")
-    if os.path.exists("./migration_data"):
-        shutil.rmtree("./migration_data")
+    db = Path("./migration_index.db")
+    data = Path("./migration_data")
+    if db.exists():
+        db.unlink()
+    if data.exists():
+        shutil.rmtree(data)
 
 
 def main():
