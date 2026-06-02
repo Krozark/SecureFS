@@ -5,6 +5,7 @@ This module contains the main SecureFSWrapper class that provides
 transparent encrypted file storage.
 """
 
+import hashlib
 import hmac
 import os
 import secrets
@@ -18,7 +19,6 @@ from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from .exceptions import EncryptionError, FileCorruptionError, SecureFSError
-from .utils import compute_hash
 
 
 class SecureFSWrapper:
@@ -303,7 +303,11 @@ class SecureFSWrapper:
 
     def _generate_dat_filename(self, logical_path: str) -> str:
         """
-        Generate a unique .dat filename based on path hash
+        Generate a unique .dat filename keyed by the master key.
+
+        Using a keyed HMAC (rather than a plain hash of the path) means the
+        storage directory alone does not let an attacker confirm guessed paths
+        by recomputing their filename.
 
         Args:
             logical_path: Logical file path
@@ -311,34 +315,39 @@ class SecureFSWrapper:
         Returns:
             .dat filename
         """
-        path_hash = compute_hash(logical_path.encode())
-        return f"{path_hash}.dat"
+        path_mac = hmac.new(self.master_key, logical_path.encode(), hashlib.sha256).hexdigest()
+        return f"{path_mac}.dat"
 
-    def _compute_content_hash(self, content: bytes) -> str:
+    def _compute_integrity_tag(self, content: bytes) -> str:
         """
-        Compute SHA-256 hash of content
+        Compute a keyed integrity tag (HMAC-SHA256) of the content.
+
+        A keyed MAC is used instead of a bare SHA-256 so the metadata database
+        does not leak a verifiable fingerprint of the plaintext: without the
+        master key, an attacker cannot confirm guessed contents or correlate
+        identical files across paths.
 
         Args:
-            content: Content to hash
+            content: Content to authenticate
 
         Returns:
-            Hexadecimal hash string
+            Hexadecimal HMAC-SHA256 string
         """
-        return compute_hash(content)
+        return hmac.new(self.master_key, content, hashlib.sha256).hexdigest()
 
-    def _verify_file_integrity(self, content: bytes, expected_hash: str) -> bool:
+    def _verify_file_integrity(self, content: bytes, expected_tag: str) -> bool:
         """
-        Verify file integrity by comparing hashes
+        Verify file integrity by comparing keyed integrity tags
 
         Args:
             content: File content
-            expected_hash: Expected hash from database
+            expected_tag: Expected integrity tag from database
 
         Returns:
-            True if hashes match, False otherwise
+            True if tags match, False otherwise
         """
-        actual_hash = self._compute_content_hash(content)
-        return hmac.compare_digest(actual_hash, expected_hash)
+        actual_tag = self._compute_integrity_tag(content)
+        return hmac.compare_digest(actual_tag, expected_tag)
 
     def _cache_get(self, logical_path: str) -> bytes | None:
         """Return cached content for a path (marking it as recently used), or None.
@@ -399,8 +408,8 @@ class SecureFSWrapper:
             dat_filename = self._generate_dat_filename(logical_path)
             dat_path = self.storage_root / dat_filename
 
-            # Compute hash
-            content_hash = self._compute_content_hash(plaintext_bytes)
+            # Compute keyed integrity tag (HMAC) of the plaintext
+            content_hash = self._compute_integrity_tag(plaintext_bytes)
 
             # Encrypt KF with KM
             kf_encrypted, kf_nonce = self._encrypt_with_km(kf)
