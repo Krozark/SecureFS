@@ -9,6 +9,7 @@ import hmac
 import os
 import secrets
 import sqlite3
+from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
 from threading import Lock
@@ -25,6 +26,10 @@ class SecureFSWrapper:
 
     _ZERO_NONCE = b"\x00" * 12
 
+    # Default maximum amount of plaintext kept in the in-memory cache (64 MiB).
+    # Prevents unbounded memory growth (a DoS vector) when many/large files are read.
+    DEFAULT_CACHE_MAX_BYTES = 64 * 1024 * 1024
+
     def __init__(
         self,
         master_key: bytes,
@@ -33,6 +38,7 @@ class SecureFSWrapper:
         verify_integrity: bool = True,
         cache_enabled: bool = False,
         encryption_enabled: bool = True,
+        cache_max_bytes: int = DEFAULT_CACHE_MAX_BYTES,
     ):
         """
         Initialize the secure file system
@@ -44,6 +50,9 @@ class SecureFSWrapper:
             verify_integrity: Enable hash verification on read (default: True)
             cache_enabled: Enable in-memory caching (default: False)
             encryption_enabled: Enable encryption (default: True, set to False for development)
+            cache_max_bytes: Maximum total size of cached plaintext in bytes. When the
+                cache grows beyond this budget, least-recently-used entries are evicted
+                (default: 64 MiB). Must be positive.
 
         Warning:
             Setting encryption_enabled=False stores data in PLAINTEXT.
@@ -52,12 +61,16 @@ class SecureFSWrapper:
         if len(master_key) != 32:
             raise ValueError("Master key must be 32 bytes (256 bits)")
 
+        if cache_max_bytes <= 0:
+            raise ValueError("cache_max_bytes must be positive")
+
         self.master_key = master_key
         self.db_path = Path(db_path)
         self.storage_root = Path(storage_root)
         self.verify_integrity = verify_integrity
         self.cache_enabled = cache_enabled
         self.encryption_enabled = encryption_enabled
+        self.cache_max_bytes = cache_max_bytes
 
         # Warn if encryption is disabled
         if not self.encryption_enabled:
@@ -73,8 +86,10 @@ class SecureFSWrapper:
         # Thread safety
         self._lock = Lock()
 
-        # Simple cache (path -> bytes)
-        self._cache: dict[str, bytes] = {}
+        # LRU cache (path -> bytes) bounded by ``cache_max_bytes``.
+        # Ordered by recency of use; the oldest entry is evicted first.
+        self._cache: OrderedDict[str, bytes] = OrderedDict()
+        self._cache_bytes = 0
 
         # Create storage directory if it doesn't exist
         self.storage_root.mkdir(parents=True, exist_ok=True)
@@ -325,6 +340,43 @@ class SecureFSWrapper:
         actual_hash = self._compute_content_hash(content)
         return hmac.compare_digest(actual_hash, expected_hash)
 
+    def _cache_get(self, logical_path: str) -> bytes | None:
+        """Return cached content for a path (marking it as recently used), or None.
+
+        Caller must hold ``self._lock``.
+        """
+        content = self._cache.get(logical_path)
+        if content is not None:
+            self._cache.move_to_end(logical_path)
+        return content
+
+    def _cache_store(self, logical_path: str, content: bytes) -> None:
+        """Insert/update a cache entry, evicting LRU entries to respect the budget.
+
+        No-op when caching is disabled. Caller must hold ``self._lock``.
+        """
+        if not self.cache_enabled:
+            return
+
+        previous = self._cache.pop(logical_path, None)
+        if previous is not None:
+            self._cache_bytes -= len(previous)
+
+        self._cache[logical_path] = content
+        self._cache_bytes += len(content)
+
+        # Evict least-recently-used entries until within budget (always keep the
+        # entry we just added, even if it alone exceeds the budget).
+        while self._cache_bytes > self.cache_max_bytes and len(self._cache) > 1:
+            _, evicted = self._cache.popitem(last=False)
+            self._cache_bytes -= len(evicted)
+
+    def _cache_discard(self, logical_path: str) -> None:
+        """Remove a single entry from the cache. Caller must hold ``self._lock``."""
+        removed = self._cache.pop(logical_path, None)
+        if removed is not None:
+            self._cache_bytes -= len(removed)
+
     def write(self, logical_path: str, plaintext_bytes: bytes) -> None:
         """
         Write an encrypted file (create or update) with atomic transaction
@@ -355,19 +407,26 @@ class SecureFSWrapper:
 
             # Track whether this is an overwrite for proper rollback
             is_overwrite = dat_path.exists()
+            temp_path = dat_path.with_suffix(".tmp")
+            backup_path = dat_path.with_suffix(".bak")
 
             # Use transaction for atomicity
             with self._get_connection() as conn:
                 cursor = conn.cursor()
 
+                committed = False
                 try:
-                    # Write .dat file first (can rollback DB if this fails)
-                    temp_path = dat_path.with_suffix(".tmp")
+                    # Write new content to a temp file first.
                     with temp_path.open("wb") as f:
                         f.write(content_nonce)
                         f.write(content_encrypted)
 
-                    # Atomic rename
+                    # On overwrite, move the existing content aside so we can
+                    # restore it if the database update fails.
+                    if is_overwrite:
+                        dat_path.replace(backup_path)
+
+                    # Atomically move the new content into place.
                     temp_path.replace(dat_path)
 
                     # Update database, preserving created_at on overwrite
@@ -396,24 +455,44 @@ class SecureFSWrapper:
                     )
 
                     conn.commit()
+                    committed = True
+
+                    # Write succeeded: drop the backup of the previous content.
+                    if is_overwrite:
+                        backup_path.unlink(missing_ok=True)
 
                     # Update cache if enabled
-                    if self.cache_enabled:
-                        self._cache[logical_path] = plaintext_bytes
+                    self._cache_store(logical_path, plaintext_bytes)
 
                 except Exception as e:
-                    # Rollback: only remove .dat file if this was a new file
-                    if not is_overwrite and dat_path.exists():
-                        dat_path.unlink()
+                    # The DB transaction is rolled back by _get_connection. Only
+                    # restore the filesystem if we never durably committed.
+                    if not committed:
+                        temp_path.unlink(missing_ok=True)
+                        if is_overwrite:
+                            # Restore the previous content if it was moved aside.
+                            if backup_path.exists():
+                                backup_path.replace(dat_path)
+                        elif dat_path.exists():
+                            # Brand new file: remove the partial write.
+                            dat_path.unlink()
                     raise SecureFSError(f"Failed to write file {logical_path}: {e}") from e
 
-    def read(self, logical_path: str, skip_verification: bool = False) -> bytes:
+    def read(
+        self,
+        logical_path: str,
+        skip_verification: bool = False,
+        bypass_cache: bool = False,
+    ) -> bytes:
         """
         Read an encrypted file and return plaintext content
 
         Args:
             logical_path: Logical file path
             skip_verification: Skip hash verification (faster but less safe)
+            bypass_cache: Ignore the in-memory cache and read straight from disk,
+                without populating the cache. Useful for integrity verification
+                that must inspect the on-disk content.
 
         Returns:
             Plaintext content
@@ -425,8 +504,10 @@ class SecureFSWrapper:
         """
         with self._lock:
             # Check cache first (inside lock for thread safety)
-            if self.cache_enabled and logical_path in self._cache:
-                return self._cache[logical_path]
+            if self.cache_enabled and not bypass_cache:
+                cached = self._cache_get(logical_path)
+                if cached is not None:
+                    return cached
 
             with self._get_connection() as conn:
                 cursor = conn.cursor()
@@ -473,9 +554,9 @@ class SecureFSWrapper:
                     f"Integrity check failed for {logical_path}: hash mismatch"
                 )
 
-            # Update cache if enabled
-            if self.cache_enabled:
-                self._cache[logical_path] = plaintext_bytes
+            # Update cache if enabled (never cache on an explicit bypass read)
+            if not bypass_cache:
+                self._cache_store(logical_path, plaintext_bytes)
 
             return plaintext_bytes
 
@@ -527,8 +608,7 @@ class SecureFSWrapper:
                 conn.commit()
 
                 # Remove from cache
-                if self.cache_enabled and logical_path in self._cache:
-                    del self._cache[logical_path]
+                self._cache_discard(logical_path)
 
                 return True
 
@@ -610,8 +690,9 @@ class SecureFSWrapper:
 
         for path in self.list_files():
             try:
-                # Read with verification
-                self.read(path, skip_verification=False)
+                # Read with verification, bypassing the cache so the on-disk
+                # content is actually re-read and checked (not a stale cache hit).
+                self.read(path, skip_verification=False, bypass_cache=True)
                 results[path] = True
             except FileCorruptionError:
                 results[path] = False
@@ -662,9 +743,10 @@ class SecureFSWrapper:
             if path is None:
                 # Clear entire cache
                 self._cache.clear()
+                self._cache_bytes = 0
             else:
                 # Remove specific file from cache
-                self._cache.pop(path, None)
+                self._cache_discard(path)
 
     def is_cached(self, path: str) -> bool:
         """
@@ -676,7 +758,8 @@ class SecureFSWrapper:
         Returns:
             True if file is in cache, False otherwise
         """
-        return path in self._cache
+        with self._lock:
+            return path in self._cache
 
     def get_cache_size(self) -> int:
         """
@@ -686,7 +769,7 @@ class SecureFSWrapper:
             Total size of all cached files in bytes
         """
         with self._lock:
-            return sum(len(content) for content in self._cache.values())
+            return self._cache_bytes
 
     def get_cached_paths(self) -> list[str]:
         """
