@@ -165,3 +165,68 @@ class TestSecureFSWrapperCache(unittest.TestCase):
 
         result = self.secure_fs.read(path)
         self.assertEqual(result, content2)
+
+
+class TestSecureFSWrapperCacheBounds(unittest.TestCase):
+    """Test suite for the bounded (LRU) cache behavior."""
+
+    def setUp(self):
+        self.test_dir = Path(tempfile.mkdtemp())
+        self.db_path = self.test_dir / "test_index.db"
+        self.storage_root = self.test_dir / "test_storage"
+        self.master_key = secrets.token_bytes(32)
+
+    def tearDown(self):
+        if self.test_dir.exists():
+            shutil.rmtree(self.test_dir)
+
+    def _make(self, **kwargs):
+        return SecureFSWrapper(
+            master_key=self.master_key,
+            db_path=self.db_path,
+            storage_root=self.storage_root,
+            cache_enabled=True,
+            **kwargs,
+        )
+
+    def test_invalid_cache_max_bytes_rejected(self):
+        """A non-positive cache budget should be rejected."""
+        with self.assertRaises(ValueError):
+            self._make(cache_max_bytes=0)
+
+    def test_lru_eviction_respects_budget(self):
+        """Cache evicts least-recently-used entries to stay within the budget."""
+        fs = self._make(cache_max_bytes=25)  # room for ~2 ten-byte files
+
+        fs.write("/a.txt", b"1234567890")  # 10 bytes
+        fs.write("/b.txt", b"1234567890")  # 10 bytes -> total 20
+        self.assertEqual(fs.get_cache_size(), 20)
+
+        # Touch /a.txt so /b.txt becomes the least-recently-used entry.
+        fs.read("/a.txt")
+
+        # Adding a third entry exceeds the 25-byte budget; /b.txt is evicted.
+        fs.write("/c.txt", b"1234567890")  # total would be 30 -> evict LRU
+
+        self.assertLessEqual(fs.get_cache_size(), 25)
+        self.assertTrue(fs.is_cached("/a.txt"))
+        self.assertFalse(fs.is_cached("/b.txt"))
+        self.assertTrue(fs.is_cached("/c.txt"))
+
+    def test_verify_all_files_bypasses_cache(self):
+        """verify_all_files must detect on-disk corruption even when cached."""
+        fs = self._make()
+        fs.write("/good.txt", b"good content")
+        fs.write("/bad.txt", b"bad content that is cached")
+
+        # Both files are now in the cache. Corrupt one on disk.
+        dat_files = sorted(Path(self.storage_root).glob("*.dat"))
+        data = bytearray(dat_files[0].read_bytes())
+        data[20] ^= 0xFF
+        dat_files[0].write_bytes(data)
+
+        results = fs.verify_all_files()
+
+        # A cache-trusting implementation would report everything OK; the
+        # bypass forces a real disk read and surfaces the corruption.
+        self.assertIn(False, results.values())
