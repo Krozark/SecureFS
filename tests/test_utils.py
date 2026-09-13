@@ -2,7 +2,19 @@
 
 import unittest
 
-from securefs.utils import compute_hash, format_size, generate_master_key, validate_master_key
+from securefs.utils import (
+    compute_hash,
+    derive_master_key,
+    format_size,
+    generate_master_key,
+    generate_salt,
+    validate_master_key,
+)
+
+
+# Cheap scrypt cost parameters so tests run fast; production code should use
+# derive_master_key()'s (much stronger, and much slower) defaults instead.
+_FAST_KDF = {"n": 2**10, "r": 8, "p": 1}
 
 
 class TestGenerateMasterKey(unittest.TestCase):
@@ -87,6 +99,90 @@ class TestFormatSize(unittest.TestCase):
     def test_petabytes(self):
         """Values >= 1 PB should display in PB."""
         self.assertEqual(format_size(1024**5), "1.0 PB")
+
+
+class TestGenerateSalt(unittest.TestCase):
+    """Tests for generate_salt()."""
+
+    def test_default_length(self):
+        """Default salt should be 16 bytes."""
+        self.assertEqual(len(generate_salt()), 16)
+
+    def test_custom_length(self):
+        """Salt length should be configurable."""
+        self.assertEqual(len(generate_salt(32)), 32)
+
+    def test_salts_are_unique(self):
+        """Successive calls should produce different salts."""
+        salts = {generate_salt() for _ in range(50)}
+        self.assertEqual(len(salts), 50)
+
+
+class TestDeriveMasterKey(unittest.TestCase):
+    """Tests for derive_master_key()."""
+
+    def setUp(self):
+        self.salt = generate_salt()
+        self.pepper = generate_master_key()  # any 32+ random bytes work as a pepper
+
+    def test_returns_valid_master_key(self):
+        """Result should be a 32-byte key usable as a SecureFS master key."""
+        key = derive_master_key("hunter2", self.salt, self.pepper, **_FAST_KDF)
+        self.assertTrue(validate_master_key(key))
+
+    def test_deterministic(self):
+        """Same inputs should always derive the same key."""
+        key1 = derive_master_key("hunter2", self.salt, self.pepper, **_FAST_KDF)
+        key2 = derive_master_key("hunter2", self.salt, self.pepper, **_FAST_KDF)
+        self.assertEqual(key1, key2)
+
+    def test_accepts_str_and_bytes_identically(self):
+        """A str account_secret should be UTF-8 encoded the same as raw bytes."""
+        key_str = derive_master_key("hunter2", self.salt, self.pepper, **_FAST_KDF)
+        key_bytes = derive_master_key(b"hunter2", self.salt, self.pepper, **_FAST_KDF)
+        self.assertEqual(key_str, key_bytes)
+
+    def test_different_account_secret_different_key(self):
+        """Changing the account secret must change the derived key."""
+        key1 = derive_master_key("hunter2", self.salt, self.pepper, **_FAST_KDF)
+        key2 = derive_master_key(
+            "correct-horse-battery-staple", self.salt, self.pepper, **_FAST_KDF
+        )
+        self.assertNotEqual(key1, key2)
+
+    def test_different_salt_different_key(self):
+        """Changing the salt must change the derived key."""
+        key1 = derive_master_key("hunter2", self.salt, self.pepper, **_FAST_KDF)
+        key2 = derive_master_key("hunter2", generate_salt(), self.pepper, **_FAST_KDF)
+        self.assertNotEqual(key1, key2)
+
+    def test_different_pepper_different_key(self):
+        """Changing the server pepper must change the derived key."""
+        key1 = derive_master_key("hunter2", self.salt, self.pepper, **_FAST_KDF)
+        key2 = derive_master_key("hunter2", self.salt, generate_master_key(), **_FAST_KDF)
+        self.assertNotEqual(key1, key2)
+
+    def test_account_secret_and_salt_alone_are_not_enough(self):
+        """The pepper is required: it cannot be reconstructed from the other inputs.
+
+        This is the core security property this function exists for: someone who
+        only knows the account secret and the (non-secret, stored) salt -- e.g.
+        the account owner, or an attacker who stole the database -- must not be
+        able to compute the master key without also holding the server pepper.
+        """
+        real_key = derive_master_key("hunter2", self.salt, self.pepper, **_FAST_KDF)
+        guessed_without_pepper = derive_master_key("hunter2", self.salt, b"\x00" * 32, **_FAST_KDF)
+        self.assertNotEqual(real_key, guessed_without_pepper)
+
+    def test_pepper_too_short_raises(self):
+        """A pepper shorter than 32 bytes must be rejected."""
+        with self.assertRaises(ValueError):
+            derive_master_key("hunter2", self.salt, b"short-pepper", **_FAST_KDF)
+
+    def test_default_parameters_produce_valid_key(self):
+        """Sanity check with the real (slow) production defaults, run only once."""
+        key = derive_master_key("hunter2", self.salt, self.pepper)
+        self.assertTrue(validate_master_key(key))
 
 
 class TestValidateMasterKey(unittest.TestCase):
