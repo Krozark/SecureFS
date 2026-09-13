@@ -309,6 +309,14 @@ class SecureFSWrapper:
         storage directory alone does not let an attacker confirm guessed paths
         by recomputing their filename.
 
+        This value is stored in the database for convenience/uniqueness, but
+        callers must always recompute it from ``logical_path`` rather than trust
+        the stored column: it is the only thing that binds a database row to a
+        specific file on disk, so a row that was tampered with independently of
+        the master key (e.g. its kf_encrypted/kf_nonce/file_hash copied from
+        another row) must not be able to redirect reads/deletes to that other
+        row's .dat file.
+
         Args:
             logical_path: Logical file path
 
@@ -523,7 +531,7 @@ class SecureFSWrapper:
 
                 cursor.execute(
                     """
-                    SELECT kf_encrypted, kf_nonce, dat_filename, file_hash
+                    SELECT kf_encrypted, kf_nonce, file_hash
                     FROM files
                     WHERE logical_path = ?
                 """,
@@ -535,12 +543,19 @@ class SecureFSWrapper:
                 if row is None:
                     raise FileNotFoundError(f"File not found: {logical_path}")
 
-                kf_encrypted, kf_nonce, dat_filename, expected_hash = row
+                kf_encrypted, kf_nonce, expected_hash = row
 
             # Decrypt KF with KM
             kf = self._decrypt_with_km(kf_encrypted, kf_nonce)
 
-            # Read .dat file
+            # Re-derive the .dat filename from the logical path instead of trusting
+            # the database column: the filename is a deterministic function of
+            # (logical_path, master_key), so recomputing it here means a database
+            # row that was tampered with independently of the master key (e.g. by
+            # copying another file's kf_encrypted/kf_nonce/file_hash into this row)
+            # can no longer make read() silently return a different file's content
+            # under this path -- it can only make decryption/verification fail below.
+            dat_filename = self._generate_dat_filename(logical_path)
             dat_path = self.storage_root / dat_filename
 
             if not dat_path.exists():
@@ -597,14 +612,14 @@ class SecureFSWrapper:
         with self._lock, self._get_connection() as conn:
             cursor = conn.cursor()
 
-            # Get .dat filename
-            cursor.execute("SELECT dat_filename FROM files WHERE logical_path = ?", (logical_path,))
-            row = cursor.fetchone()
-
-            if row is None:
+            cursor.execute("SELECT 1 FROM files WHERE logical_path = ?", (logical_path,))
+            if cursor.fetchone() is None:
                 return False
 
-            dat_filename = row[0]
+            # Re-derive the .dat filename rather than trusting the database column
+            # (see read() for why: it must not be possible to redirect a delete to
+            # an unrelated file by tampering with the database alone).
+            dat_filename = self._generate_dat_filename(logical_path)
 
             try:
                 # Delete .dat file first (can still rollback DB if this fails)
