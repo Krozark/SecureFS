@@ -16,7 +16,9 @@ from pathlib import Path
 from threading import Lock
 
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from .exceptions import EncryptionError, FileCorruptionError, SecureFSError
 
@@ -25,6 +27,12 @@ class SecureFSWrapper:
     """Enhanced transparent wrapper for encrypted file system"""
 
     _ZERO_NONCE = b"\x00" * 12
+
+    # HKDF "info" labels used to derive independent, single-purpose subkeys from
+    # the master key -- see _derive_subkey().
+    _HKDF_INFO_WRAP = b"securefs-v1-kf-wrap"
+    _HKDF_INFO_PATH = b"securefs-v1-path-mac"
+    _HKDF_INFO_INTEGRITY = b"securefs-v1-integrity-mac"
 
     # Default maximum amount of plaintext kept in the in-memory cache (64 MiB).
     # Prevents unbounded memory growth (a DoS vector) when many/large files are read.
@@ -44,7 +52,9 @@ class SecureFSWrapper:
         Initialize the secure file system
 
         Args:
-            master_key: Master key (KM) - must be 32 bytes (256 bits)
+            master_key: Master key (KM) - must be 32 bytes (256 bits). Never stored
+                as-is: independent subkeys are derived from it via HKDF for each
+                internal purpose (see _derive_subkey).
             db_path: Path to SQLite database
             storage_root: Root directory to store .dat files
             verify_integrity: Enable hash verification on read (default: True)
@@ -64,7 +74,14 @@ class SecureFSWrapper:
         if cache_max_bytes <= 0:
             raise ValueError("cache_max_bytes must be positive")
 
-        self.master_key = master_key
+        # Derive independent, single-purpose subkeys from the master key instead
+        # of reusing the same raw key material for AES-GCM and for HMAC. This is
+        # a defense-in-depth measure (NIST SP 800-108 / RFC 5869): a future
+        # weakness found in one use can't leak into the others. Only the derived
+        # subkeys are kept; the master key itself is not retained beyond this.
+        self._key_wrap = self._derive_subkey(master_key, self._HKDF_INFO_WRAP)
+        self._key_path = self._derive_subkey(master_key, self._HKDF_INFO_PATH)
+        self._key_integrity = self._derive_subkey(master_key, self._HKDF_INFO_INTEGRITY)
         self.db_path = Path(db_path)
         self.storage_root = Path(storage_root)
         self.verify_integrity = verify_integrity
@@ -96,6 +113,26 @@ class SecureFSWrapper:
 
         # Initialize database
         self._init_database()
+
+    @staticmethod
+    def _derive_subkey(master_key: bytes, info: bytes) -> bytes:
+        """Derive a 32-byte subkey from the master key via HKDF-SHA256.
+
+        ``info`` domain-separates each derived subkey so that, even though they
+        all come from the same master key, they are cryptographically
+        independent of one another.
+
+        Args:
+            master_key: The master key (KM) to derive from.
+            info: Purpose-specific label (one of the ``_HKDF_INFO_*`` constants).
+
+        Returns:
+            A 32-byte subkey.
+        """
+        subkey: bytes = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=info).derive(
+            master_key
+        )
+        return subkey
 
     @contextmanager
     def _get_connection(self):
@@ -190,7 +227,7 @@ class SecureFSWrapper:
 
         try:
             nonce = secrets.token_bytes(12)
-            cipher = Cipher(algorithms.AES(self.master_key), modes.GCM(nonce))
+            cipher = Cipher(algorithms.AES(self._key_wrap), modes.GCM(nonce))
             encryptor = cipher.encryptor()
 
             ciphertext = encryptor.update(data) + encryptor.finalize()
@@ -225,7 +262,7 @@ class SecureFSWrapper:
             ciphertext = ciphertext_with_tag[:-16]
             tag = ciphertext_with_tag[-16:]
 
-            cipher = Cipher(algorithms.AES(self.master_key), modes.GCM(nonce, tag))
+            cipher = Cipher(algorithms.AES(self._key_wrap), modes.GCM(nonce, tag))
             decryptor = cipher.decryptor()
 
             result: bytes = decryptor.update(ciphertext) + decryptor.finalize()
@@ -323,7 +360,7 @@ class SecureFSWrapper:
         Returns:
             .dat filename
         """
-        path_mac = hmac.new(self.master_key, logical_path.encode(), hashlib.sha256).hexdigest()
+        path_mac = hmac.new(self._key_path, logical_path.encode(), hashlib.sha256).hexdigest()
         return f"{path_mac}.dat"
 
     def _compute_integrity_tag(self, content: bytes) -> str:
@@ -341,7 +378,7 @@ class SecureFSWrapper:
         Returns:
             Hexadecimal HMAC-SHA256 string
         """
-        return hmac.new(self.master_key, content, hashlib.sha256).hexdigest()
+        return hmac.new(self._key_integrity, content, hashlib.sha256).hexdigest()
 
     def _verify_file_integrity(self, content: bytes, expected_tag: str) -> bool:
         """
