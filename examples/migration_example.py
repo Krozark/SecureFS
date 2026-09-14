@@ -1,89 +1,99 @@
 """
-Migration example: switching between encrypted and plaintext modes
+Migration example: moving development (plaintext) data into encrypted storage.
+
+Files written with encryption_enabled=False sit in the clear on disk. An
+encrypted instance deliberately refuses to read them -- serving them would mean
+calling "protected" something that anyone able to copy the storage directory
+can already read. Migrating them is therefore explicit: read them in
+development mode, then write them back through an encrypted instance.
 """
 
-import shutil
+import tempfile
 from pathlib import Path
 
-from securefs import SecureFSWrapper
+from securefs import EncryptionError, SecureFSWrapper
 from securefs.utils import generate_master_key
-
-
-def cleanup():
-    """Clean up example files"""
-    db = Path("./migration_index.db")
-    data = Path("./migration_data")
-    if db.exists():
-        db.unlink()
-    if data.exists():
-        shutil.rmtree(data)
 
 
 def main():
     print("SecureFS - Migration Example")
     print("=" * 60)
 
-    # Generate a master key
     master_key = generate_master_key()
 
-    # Phase 1: Development (plaintext)
-    print("\\n📝 Phase 1: Development mode (plaintext)")
-    print("-" * 60)
+    with tempfile.TemporaryDirectory() as tmp:
+        root = Path(tmp)
+        db_path = root / "migration_index.db"
+        storage_root = root / "migration_data"
 
-    dev_fs = SecureFSWrapper(
-        master_key=master_key,
-        db_path="./migration_index.db",
-        storage_root="./migration_data",
-        encryption_enabled=False,  # Plaintext mode
-    )
+        def open_store(*, encrypted: bool) -> SecureFSWrapper:
+            return SecureFSWrapper(
+                master_key=master_key,
+                db_path=db_path,
+                storage_root=storage_root,
+                encryption_enabled=encrypted,
+            )
 
-    dev_fs.write("/app/config.txt", b"Debug mode enabled")
-    dev_fs.write("/app/data.txt", b"Development data")
+        # Phase 1: development mode -- content is stored in the clear.
+        print("\n📝 Phase 1: Development mode (plaintext)")
+        print("-" * 60)
 
-    print("✅ Created 2 plaintext files")
-    print(f"📋 Files: {dev_fs.list_files()}")
+        dev_fs = open_store(encrypted=False)
+        dev_fs.write("/app/config.txt", b"Debug mode enabled")
+        dev_fs.write("/app/data.txt", b"Development data")
+        legacy_paths = dev_fs.list_files()
+        dev_fs.close()
 
-    dev_fs.close()
+        print(f"✅ Created {len(legacy_paths)} plaintext files: {legacy_paths}")
 
-    # Phase 2: Production (encrypted)
-    print("\\n📝 Phase 2: Production mode (encrypted)")
-    print("-" * 60)
+        # The content really is readable without any key.
+        sample = next(storage_root.glob("*.dat")).read_bytes()
+        print(f"⚠️  Raw on disk, no key needed: {sample[12:]!r}")
 
-    prod_fs = SecureFSWrapper(
-        master_key=master_key,
-        db_path="./migration_index.db",
-        storage_root="./migration_data",
-        encryption_enabled=True,  # Encrypted mode
-    )
+        # Phase 2: an encrypted instance refuses to serve that unprotected data.
+        print("\n📝 Phase 2: Production mode (encrypted)")
+        print("-" * 60)
 
-    # Read old plaintext files
-    print("📖 Reading old plaintext files:")
-    config = prod_fs.read("/app/config.txt")
-    data = prod_fs.read("/app/data.txt")
-    print(f"  - config.txt: {config.decode()}")
-    print(f"  - data.txt: {data.decode()}")
+        prod_fs = open_store(encrypted=True)
+        try:
+            prod_fs.read(legacy_paths[0])
+        except EncryptionError:
+            print("✅ Encrypted instance refused the unprotected legacy file")
 
-    # Write new encrypted files
-    prod_fs.write("/app/secrets.txt", b"Production secrets")
-    print("\\n✅ Created new encrypted file")
+        # Phase 3: migrate explicitly -- read in development mode, write back
+        # through the encrypted instance.
+        print("\n📝 Phase 3: Migrating the legacy files")
+        print("-" * 60)
 
-    # List all files (mix of plaintext and encrypted)
-    print(f"\\n📋 All files: {prod_fs.list_files()}")
+        dev_fs = open_store(encrypted=False)
+        recovered = {path: dev_fs.read(path, bypass_cache=True) for path in legacy_paths}
+        dev_fs.close()
 
-    # Verify all files are accessible
-    print("\\n🔍 Verifying all files are readable:")
-    for path in prod_fs.list_files():
-        content = prod_fs.read(path)
-        print(f"  ✅ {path}: {len(content)} bytes")
+        for path, content in recovered.items():
+            prod_fs.write(path, content)
+            print(f"  ✅ {path}: {len(content)} bytes re-encrypted")
 
-    prod_fs.close()
+        prod_fs.write("/app/secrets.txt", b"Production secrets")
 
-    print("\\n✅ Migration example completed!")
-    print("\\n💡 Key takeaway: SecureFS automatically handles mixed")
-    print("   encrypted/plaintext files based on the nonce in the database.")
+        # Everything is now encrypted and readable again.
+        print("\n🔍 Verifying all files:")
+        for path in prod_fs.list_files():
+            content = prod_fs.read(path, bypass_cache=True)
+            print(f"  ✅ {path}: {len(content)} bytes")
 
-    # Clean up
-    cleanup()
+        on_disk = b"".join(p.read_bytes() for p in storage_root.glob("*.dat"))
+        assert b"Debug mode enabled" not in on_disk, "migrated content must not stay in clear"
+        print("\n✅ No plaintext left in the storage directory")
+
+        # Phase 4: clear out what the migration left behind.
+        removed = prod_fs.cleanup_orphaned_files(include_orphaned_data=True)
+        print(f"🧹 Cleanup removed: {removed}")
+
+        prod_fs.close()
+
+    print("\n✅ Migration example completed!")
+    print("\n💡 Key takeaway: an encrypted store never serves unencrypted content.")
+    print("   Migrating legacy plaintext is an explicit, deliberate step.")
 
 
 if __name__ == "__main__":

@@ -21,7 +21,7 @@ from pathlib import Path
 
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-from securefs import FileCorruptionError, SecureFSError, SecureFSWrapper
+from securefs import EncryptionError, FileCorruptionError, SecureFSError, SecureFSWrapper
 
 
 class TestRowTampering(unittest.TestCase):
@@ -181,8 +181,9 @@ class TestPlaintextMarkerDowngrade(unittest.TestCase):
 
         self._forge(b'{"admin": true}')
 
+        # An encrypted instance refuses the plaintext marker outright.
         fs = self._make(verify_integrity=False)
-        with self.assertRaises(FileCorruptionError):
+        with self.assertRaises(EncryptionError):
             fs.read("/config/policy.json")
         fs.close()
 
@@ -195,8 +196,38 @@ class TestPlaintextMarkerDowngrade(unittest.TestCase):
         self._forge(b'{"admin": true}')
 
         fs = self._make()
+        with self.assertRaises(EncryptionError):
+            fs.read("/config/policy.json", skip_verification=True)
+        fs.close()
+
+    def test_forgery_in_development_mode_rejected_by_integrity_tag(self):
+        """In development mode the plaintext marker is legitimate, so the keyed
+        integrity tag is what has to catch the forgery -- even with checks off."""
+        fs = self._make(encryption_enabled=False, verify_integrity=False)
+        fs.write("/config/policy.json", b'{"admin": false}')
+        fs.close()
+
+        self._forge(b'{"admin": true}')
+
+        fs = self._make(encryption_enabled=False, verify_integrity=False)
         with self.assertRaises(FileCorruptionError):
             fs.read("/config/policy.json", skip_verification=True)
+        fs.close()
+
+    def test_encrypted_instance_refuses_legacy_plaintext_entries(self):
+        """Content written in development mode sits in the clear on disk, so an
+        encrypted instance must refuse it rather than pass it off as protected."""
+        fs = self._make(encryption_enabled=False)
+        fs.write("/legacy/secret.txt", b"PASSWORD: admin123")
+        fs.close()
+
+        # The content really is readable by anyone holding the storage directory.
+        dat_path = next(self.storage_root.glob("*.dat"))
+        self.assertIn(b"PASSWORD: admin123", dat_path.read_bytes())
+
+        fs = self._make()
+        with self.assertRaises(EncryptionError):
+            fs.read("/legacy/secret.txt")
         fs.close()
 
     def test_genuine_plaintext_files_remain_readable(self):

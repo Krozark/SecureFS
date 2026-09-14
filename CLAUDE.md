@@ -94,6 +94,10 @@ examples/           # Usage examples
 - **Storage**: Each file stored as `<sha256-of-path>.dat` containing `nonce || ciphertext || tag`.
 - **Database**: SQLite with WAL mode for concurrency. Tables: `files` (metadata), `system_metadata`.
 - **Thread safety**: All mutating operations protected by `threading.Lock`.
-- **Plaintext mode**: Detected via all-zero nonce. Supports mixed encrypted/plaintext storage.
+- **Plaintext mode**: Marked by an all-zero nonce, and only honored when
+  `encryption_enabled=False`. An encrypted instance refuses such entries, so it never
+  serves content that is unprotected on disk; migrating legacy plaintext is explicit.
+  Because nothing AEAD-authenticates those entries, their keyed integrity tag is always
+  verified, even when `verify_integrity`/`skip_verification` would skip it.
 - **Cross-platform**: Designed to run on Windows, Linux, and macOS. Uses `pathlib` and
   `os.path` for path handling. Avoids platform-specific APIs.

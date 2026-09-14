@@ -602,20 +602,34 @@ class SecureFSWrapper:
                 content_nonce = f.read(12)
                 content_encrypted = f.read()
 
-            # Decrypt content with KF
-            plaintext_bytes = self._decrypt_file_content(content_encrypted, content_nonce, kf)
-
-            # A zero nonce means the corresponding layer was stored unencrypted, so
-            # no AEAD tag authenticated it. That marker is read back from the
-            # database and the .dat file, which an attacker may be able to write
-            # without knowing the master key: they can mark a row as "plaintext",
-            # supply a file key of their choosing, and hand us content they
-            # encrypted themselves. On that path the keyed integrity tag is the
-            # only thing tying the content back to the master key, so it must be
-            # checked even when verification is otherwise turned off.
+            # A zero nonce marks a layer that was stored unencrypted, so no AEAD
+            # tag authenticated it.
             aead_authenticated = self._is_encrypted_nonce(kf_nonce) and self._is_encrypted_nonce(
                 content_nonce
             )
+
+            # Running with encryption on, such an entry must never be served. It is
+            # either legacy data written in development mode -- whose content sits
+            # in the clear on disk, readable by anyone who can copy the storage
+            # directory, so calling it protected would be a lie -- or an attacker
+            # marking a row as plaintext to slip in a file key of their own. This
+            # keeps the guarantee simple: if an encrypted instance returns content,
+            # that content really was encrypted at rest.
+            if self.encryption_enabled and not aead_authenticated:
+                raise EncryptionError(
+                    f"Refusing to read unencrypted entry {logical_path} while encryption "
+                    "is enabled: its content is not protected on disk. Re-open with "
+                    "encryption_enabled=False to read it, then write it back to an "
+                    "encrypted store."
+                )
+
+            # Decrypt content with KF
+            plaintext_bytes = self._decrypt_file_content(content_encrypted, content_nonce, kf)
+
+            # In development mode unencrypted entries are expected, but nothing
+            # AEAD-authenticated them: the keyed integrity tag is then the only
+            # thing tying the content back to the master key, so check it even when
+            # verification was otherwise turned off.
             verification_requested = self.verify_integrity and not skip_verification
 
             if (
@@ -777,6 +791,62 @@ class SecureFSWrapper:
 
         return results
 
+    def cleanup_orphaned_files(self, include_orphaned_data: bool = False) -> dict[str, int]:
+        """Remove leftover files in the storage directory that nothing references.
+
+        A crash or a failed write can leave a ``.tmp`` file (a half-written new
+        version) or a ``.bak`` file (the previous version, moved aside) behind.
+        Neither is ever referenced by the index once the write is over, so both
+        are always safe to remove.
+
+        Orphaned ``.dat`` files -- ones no index entry points to -- are dead
+        ciphertext: the file key needed to decrypt them lived in the row that is
+        now gone, so nobody can ever read them again. They are still only removed
+        when ``include_orphaned_data`` is set, so that pointing the wrapper at the
+        wrong database cannot quietly delete live data.
+
+        Args:
+            include_orphaned_data: Also remove .dat files with no index entry.
+
+        Returns:
+            How many files were removed per extension, e.g.
+            ``{"tmp": 2, "bak": 1, "dat": 0}``.
+
+        Raises:
+            SecureFSError: If a file could not be removed.
+        """
+        removed = {"tmp": 0, "bak": 0, "dat": 0}
+
+        # Hold the lock so a concurrent write() can't have its in-flight .tmp or
+        # .bak deleted from under it.
+        with self._lock:
+            referenced = (
+                {self._generate_dat_filename(path) for path in self.list_files()}
+                if include_orphaned_data
+                else set()
+            )
+
+            try:
+                for entry in self.storage_root.iterdir():
+                    if not entry.is_file():
+                        continue
+
+                    suffix = entry.suffix.lstrip(".")
+                    if suffix in ("tmp", "bak"):
+                        orphaned = True
+                    elif suffix == "dat":
+                        orphaned = include_orphaned_data and entry.name not in referenced
+                    else:
+                        orphaned = False
+
+                    if orphaned:
+                        entry.unlink(missing_ok=True)
+                        removed[suffix] += 1
+            except OSError as e:
+                raise SecureFSError(f"Failed to clean up storage directory: {e}") from e
+
+        return removed
+
     def get_statistics(self) -> dict:
         """
         Get system statistics
@@ -793,15 +863,20 @@ class SecureFSWrapper:
             )
             count, total_size, oldest, newest = cursor.fetchone()
 
-            return {
-                "total_files": count or 0,
-                "total_size_bytes": total_size,
-                "oldest_file": oldest,
-                "newest_modification": newest,
-                "cache_enabled": self.cache_enabled,
-                "cache_entries": len(self._cache) if self.cache_enabled else 0,
-                "encryption_enabled": self.encryption_enabled,
-            }
+        # Read the cache under the lock, like every other cache accessor. Taken
+        # after the database work so the lock isn't held across any I/O.
+        with self._lock:
+            cache_entries = len(self._cache) if self.cache_enabled else 0
+
+        return {
+            "total_files": count or 0,
+            "total_size_bytes": total_size,
+            "oldest_file": oldest,
+            "newest_modification": newest,
+            "cache_enabled": self.cache_enabled,
+            "cache_entries": cache_entries,
+            "encryption_enabled": self.encryption_enabled,
+        }
 
     def clear_cache(self, path: str | None = None):
         """

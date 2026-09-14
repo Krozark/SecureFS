@@ -124,20 +124,51 @@ fs = SecureFSWrapper(
 
 D'autres exemples complets sont disponibles dans [`examples/`](examples/) :
 cache, multi-threading, gestion d'erreurs et corruption, dérivation de clé
-par compte, cohabitation de fichiers chiffrés/non chiffrés.
+par compte, migration de données en clair vers un store chiffré.
 
 ## Modèle de sécurité
 
-- Ce qui est protégé, c'est le **contenu** des fichiers : chiffré en
-  AES-256-GCM, avec vérification d'intégrité par HMAC.
-- Les **chemins logiques** (ex. `/documents/secret.txt`) sont stockés en
-  clair dans la base SQLite de métadonnées — c'est un choix assumé, la
+**La garantie principale** : en mode normal (chiffrement actif), quelqu'un
+qui copie la base de métadonnées **et** tout le répertoire de stockage, sans
+connaître la clé maîtresse, ne peut retrouver aucun contenu de fichier. Les
+clés par fichier ne sont stockées que chiffrées sous une sous-clé dérivée de
+la clé maîtresse, et les noms de fichiers `.dat` sont eux-mêmes dérivés par
+HMAC de cette clé. Cette garantie est couverte par
+[`tests/test_at_rest_confidentiality.py`](tests/test_at_rest_confidentiality.py).
+
+Un store chiffré **refuse** de servir une entrée non chiffrée (`EncryptionError`),
+même si la vérification d'intégrité est désactivée. Sans ce refus, des fichiers
+écrits en mode développement resteraient lisibles en clair sur disque tout en
+étant servis comme s'ils étaient protégés. Migrer d'anciennes données en clair
+est donc une étape explicite — voir
+[`examples/migration_example.py`](examples/migration_example.py).
+
+Ce qui n'est **pas** couvert :
+
+- Les **chemins logiques** (ex. `/documents/secret.txt`), leur taille et leurs
+  dates sont stockés en clair dans la base de métadonnées — choix assumé, la
   confidentialité ne porte que sur le contenu, pas sur l'arborescence.
-- Il n'y a pas de rotation de clé maîtresse pour l'instant : en changer
-  revient à repartir d'un stockage vide.
-- Utilisable sans serveur ni secret externe : la sécurité du mode "mot de
-  passe" (`derive_master_key`) repose entièrement sur la force de ce mot
-  de passe.
+- Deux fichiers au contenu identique produisent le même tag d'intégrité : un
+  observateur de la base peut détecter cette égalité, sans pour autant
+  deviner le contenu.
+- Il n'y a pas de rotation de clé maîtresse : en changer revient à repartir
+  d'un stockage vide.
+- En mode "mot de passe" (`derive_master_key`), la sécurité repose
+  entièrement sur la force de ce mot de passe.
+
+## Entretien du stockage
+
+Un arrêt brutal en pleine écriture peut laisser des fichiers `.tmp` ou `.bak`
+derrière lui. `cleanup_orphaned_files()` les supprime :
+
+```python
+fs.cleanup_orphaned_files()
+# {'tmp': 2, 'bak': 1, 'dat': 0}
+
+# Supprime aussi les .dat qu'aucune entrée ne référence (du chiffré mort :
+# la clé qui permettait de les lire a disparu avec leur ligne en base).
+fs.cleanup_orphaned_files(include_orphaned_data=True)
+```
 
 ## Développement
 

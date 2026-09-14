@@ -223,12 +223,34 @@ class TestSecureFSWrapperNoEncryption(unittest.TestCase):
             encryption_enabled=True,  # Now encryption is ON
         )
 
-        # Should still be able to read old plaintext files
-        result1 = encrypted_fs.read(path1)
-        result2 = encrypted_fs.read(path2)
+        # The old files are still sitting in the clear on disk, so an encrypted
+        # instance must refuse them instead of passing them off as protected.
+        from securefs import EncryptionError
 
-        self.assertEqual(result1, b"This was stored without encryption")
-        self.assertEqual(result2, b"Also plaintext")
+        with self.assertRaises(EncryptionError):
+            encrypted_fs.read(path1)
+        with self.assertRaises(EncryptionError):
+            encrypted_fs.read(path2)
+
+        # Migrating them means reading in development mode and writing back
+        # through the encrypted instance.
+        plaintext_fs = SecureFSWrapper(
+            master_key=self.master_key,
+            db_path=self.db_path,
+            storage_root=self.storage_root,
+            encryption_enabled=False,
+        )
+        recovered1 = plaintext_fs.read(path1, bypass_cache=True)
+        recovered2 = plaintext_fs.read(path2, bypass_cache=True)
+        plaintext_fs.close()
+
+        self.assertEqual(recovered1, b"This was stored without encryption")
+        self.assertEqual(recovered2, b"Also plaintext")
+
+        encrypted_fs.write(path1, recovered1)
+        encrypted_fs.write(path2, recovered2)
+        self.assertEqual(encrypted_fs.read(path1, bypass_cache=True), recovered1)
+        self.assertEqual(encrypted_fs.read(path2, bypass_cache=True), recovered2)
 
         # Write a new file with encryption enabled
         path3 = "/file_encrypted.txt"
