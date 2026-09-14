@@ -14,11 +14,13 @@ qui a besoin de garder des fichiers confidentiels sur disque.
 ## Fonctionnalités
 
 - 🔐 Chiffrement transparent du contenu en AES-256-GCM
-- 🔑 Architecture à deux niveaux : une clé maîtresse chiffre une clé unique par fichier
+- 🔑 Architecture à deux niveaux : une clé unique par fichier, chiffrée sous la clé maîtresse
 - 🔒 Dérivation de la clé maîtresse depuis un mot de passe (scrypt) — aucun serveur requis
-- ✅ Vérification d'intégrité (détecte toute altération des fichiers sur le disque)
+- ✅ Vérification d'intégrité (détecte toute altération du contenu sur le disque)
+- 🚫 Refus de servir un contenu non chiffré quand le chiffrement est actif
 - 🗄️ Métadonnées indexées en SQLite (listing par préfixe, statistiques)
-- 🚀 Thread-safe (les opérations de lecture/écriture sont protégées par un verrou)
+- 🧹 Nettoyage des fichiers résiduels laissés par une écriture interrompue
+- 🚀 Thread-safe (voir [Concurrence](#concurrence) : correction, pas débit)
 - ⚡ Cache en mémoire optionnel, borné en taille (éviction LRU)
 - 🧪 Mode "sans chiffrement" pour le développement/les tests (jamais en production)
 
@@ -87,13 +89,21 @@ fs.write("/report.pdf", b"...")
 try:
     fs.read("/report.pdf")
 except FileCorruptionError:
-    print("Le fichier a été altéré ou corrompu sur le disque")
+    # Le contenu ne s'authentifie pas : altéré, ou corrompu sur le disque.
+    print("Le fichier a été altéré ou corrompu")
 except EncryptionError:
-    print("Mauvaise clé, ou données chiffrées invalides")
+    # Mauvaise clé, ou entrée marquée comme non chiffrée alors que le
+    # chiffrement est actif — SecureFS refuse alors de la servir.
+    print("Déchiffrement impossible")
+except FileNotFoundError:
+    print("Chemin inconnu, ou fichier .dat manquant")
 
 # Vérifier l'intégrité de tous les fichiers d'un coup
 results = fs.verify_all_files()  # {"/report.pdf": True, ...}
 ```
+
+Toutes les exceptions de la librairie dérivent de `SecureFSError`, qu'on peut
+donc attraper seule pour tout couvrir.
 
 ## Cache en mémoire
 
@@ -193,6 +203,12 @@ ruff check --fix . && ruff format . && mypy securefs/ && pytest
 
 Voir [`CLAUDE.md`](CLAUDE.md) pour le détail de l'architecture et du
 workflow de développement (dont le scan de sécurité `bandit`).
+
+## Changelog
+
+Voir [`CHANGELOG.md`](CHANGELOG.md). ⚠️ Le format de stockage a changé et
+aucune migration n'est fournie : un store créé par une version antérieure
+n'est pas lisible.
 
 ## Licence
 

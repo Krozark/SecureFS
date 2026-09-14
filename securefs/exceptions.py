@@ -15,18 +15,20 @@ class SecureFSError(Exception):
 
 
 class FileCorruptionError(SecureFSError):
-    """Raised when a file's integrity check fails.
+    """Raised when stored content fails to authenticate.
 
-    This indicates that the stored content does not match its expected
-    SHA-256 hash, meaning the data on disk has been tampered with or
-    corrupted since it was written.
+    Either the AES-GCM tag on the content did not verify, or the content did
+    not match the keyed integrity tag recorded when it was written. Both mean
+    the same thing: what is on disk is not what was stored, whether through
+    corruption or tampering.
     """
 
 
 class EncryptionError(SecureFSError):
-    """Raised when an encryption or decryption operation fails.
+    """Raised when data cannot be encrypted, decrypted, or safely served.
 
-    Common causes include using the wrong master key to decrypt data,
-    or encountering corrupted ciphertext that produces an invalid
-    GCM authentication tag.
+    Common causes are the wrong master key, ciphertext whose authentication
+    tag does not verify, and -- when encryption is enabled -- a record marked
+    as stored in the clear, which is refused rather than served as if it had
+    been protected.
     """

@@ -25,7 +25,17 @@ from .utils import validate_master_key
 
 
 class SecureFSWrapper:
-    """Enhanced transparent wrapper for encrypted file system"""
+    """Transparent encrypted file storage over a directory and a SQLite index.
+
+    Content is encrypted with AES-256-GCM under a per-file key, itself stored
+    wrapped under a subkey of the master key, so recovering any content
+    requires the master key. Files are named on disk by a keyed HMAC of their
+    logical path, and that name is always re-derived rather than stored.
+
+    Paths, sizes and timestamps are kept in the clear in the index: only
+    content confidentiality is in scope. See the project README for the full
+    threat model.
+    """
 
     # AES-GCM parameters. A nonce of all zeros marks data stored unencrypted.
     _NONCE_LEN = 12
@@ -409,14 +419,21 @@ class SecureFSWrapper:
 
     def write(self, logical_path: str, plaintext_bytes: bytes) -> None:
         """
-        Write an encrypted file (create or update) with atomic transaction
+        Write a file, creating it or replacing its content
+
+        The new content is staged in a temporary file and moved into place, and
+        any previous content is kept aside until the index is committed, so a
+        failed write rolls back to the previous version. A process killed
+        between the move and the commit can still leave the new content on disk
+        with the old key in the index, which reads as corruption; the leftovers
+        are removable with :meth:`cleanup_orphaned_files`.
 
         Args:
             logical_path: Logical path (e.g., /secure/data/image.jpg)
             plaintext_bytes: Plaintext content to encrypt
 
         Raises:
-            SecureFSError: If write operation fails
+            SecureFSError: If the write fails
         """
         with self._lock:
             # Generate file key (KF)
@@ -526,9 +543,11 @@ class SecureFSWrapper:
             Plaintext content
 
         Raises:
-            FileNotFoundError: If file doesn't exist
-            FileCorruptionError: If integrity check fails
-            EncryptionError: If decryption fails
+            FileNotFoundError: If the path is not in the index, or its .dat
+                file is missing
+            FileCorruptionError: If the content fails to authenticate
+            EncryptionError: If decryption fails, or if the record is marked as
+                stored in the clear while encryption is enabled
         """
         with self._lock:
             # Check cache first (inside lock for thread safety)
@@ -885,5 +904,11 @@ class SecureFSWrapper:
             return list(self._cache.keys())
 
     def close(self):
-        """Clean up resources"""
+        """Drop cached plaintext.
+
+        There is nothing else to release: database connections live only for
+        the length of one operation. Note that Python cannot reliably wipe the
+        derived subkeys from memory, so closing is not a substitute for ending
+        the process when handling sensitive material.
+        """
         self.clear_cache()

@@ -7,6 +7,10 @@ with SQLite metadata storage, integrity verification, thread-safe operations, an
 optional caching. It uses a two-level encryption architecture: a master key (KM)
 encrypts per-file keys (KF), which in turn encrypt file contents.
 
+The guarantee it exists to provide: with the index and the whole storage directory but
+no master key, no file content is recoverable. Paths, sizes and timestamps are in the
+clear by design -- only content confidentiality is in scope.
+
 ## Build & Setup
 
 ```bash
@@ -91,8 +95,14 @@ examples/           # Usage examples
 
 ## Architecture Notes
 
-- **Encryption**: AES-256-GCM with 12-byte random nonces. Per-file keys (KF, 32 bytes)
-  encrypted with master key (KM, 32 bytes). GCM provides authenticated encryption (16-byte tag).
+- **Encryption**: AES-256-GCM with 12-byte random nonces (16-byte tag). A fresh per-file
+  key (KF, 32 bytes) per write, wrapped under a subkey of the master key. The master key
+  is never used directly: `_derive_subkey()` derives three independent HKDF subkeys
+  (`_key_wrap`, `_key_path`, `_key_integrity`) so one use can't affect another, and the
+  master key itself is not retained past `__init__`.
+- **Sealing**: one `_seal()`/`_open()` pair does all AES-GCM work; `_open()` is also where
+  an unencrypted record is refused when `encryption_enabled=True`, so the rule holds for
+  every caller rather than at one call site.
 - **Storage**: Each file stored as `<hmac-sha256-of-path>.dat` containing
   `nonce || ciphertext || tag`. The filename is keyed by a master-key subkey and derived on
   every access via `_dat_path()`. It is deliberately not persisted: a stored copy would be
@@ -113,5 +123,8 @@ examples/           # Usage examples
   serves content that is unprotected on disk; migrating legacy plaintext is explicit.
   Because nothing AEAD-authenticates those entries, their keyed integrity tag is always
   verified, even when `verify_integrity`/`skip_verification` would skip it.
+- **Housekeeping**: `cleanup_orphaned_files()` removes `.tmp`/`.bak` leftovers from
+  interrupted writes; unreferenced `.dat` files (dead ciphertext, their key gone with the
+  row) only under `include_orphaned_data=True`.
 - **Cross-platform**: Designed to run on Windows, Linux, and macOS. Uses `pathlib` and
   `os.path` for path handling. Avoids platform-specific APIs.
