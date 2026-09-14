@@ -82,8 +82,10 @@ securefs/           # Main package
   __version__.py    # Version metadata
   core.py           # SecureFSWrapper - main class
   exceptions.py     # SecureFSError, FileCorruptionError, EncryptionError
-  utils.py          # generate_master_key, compute_hash, format_size, validate_master_key
+  utils.py          # generate_master_key, derive_master_key, generate_salt,
+                    # compute_hash, format_size, validate_master_key
 tests/              # Test suite (unittest + pytest)
+  _helpers.py       # SecureFSTestCase: temp store, master key, make_fs() factory
 examples/           # Usage examples
 ```
 
@@ -92,8 +94,9 @@ examples/           # Usage examples
 - **Encryption**: AES-256-GCM with 12-byte random nonces. Per-file keys (KF, 32 bytes)
   encrypted with master key (KM, 32 bytes). GCM provides authenticated encryption (16-byte tag).
 - **Storage**: Each file stored as `<hmac-sha256-of-path>.dat` containing
-  `nonce || ciphertext || tag`. The filename is keyed by a master-key subkey and is always
-  re-derived via `_dat_path()`, never read back from the database.
+  `nonce || ciphertext || tag`. The filename is keyed by a master-key subkey and derived on
+  every access via `_dat_path()`. It is deliberately not persisted: a stored copy would be
+  a second, independently tamperable mapping from a row to a file on disk.
 - **Database**: SQLite with WAL mode for concurrency. Tables: `files` (metadata), `system_metadata`.
 - **Thread safety**: All mutating operations protected by `threading.Lock`. This buys
   correctness, not throughput -- and that is deliberate. Measured on a 4-core box:

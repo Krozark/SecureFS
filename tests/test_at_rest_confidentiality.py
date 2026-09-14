@@ -5,35 +5,22 @@ directory and the metadata database -- everything SecureFS persists -- but does
 not know the master key. They must not be able to recover any file content.
 """
 
-import secrets
-import shutil
 import sqlite3
-import tempfile
 import unittest
-from pathlib import Path
 
 from securefs import EncryptionError, SecureFSError, SecureFSWrapper
+from securefs.utils import generate_master_key
+from tests._helpers import SecureFSTestCase
 
 
 SECRET = b"PASSWORD=hunter2; BALANCE=999999"
 
 
-class TestAtRestConfidentiality(unittest.TestCase):
+class TestAtRestConfidentiality(SecureFSTestCase):
     def setUp(self):
-        self.test_dir = Path(tempfile.mkdtemp())
-        self.db_path = self.test_dir / "index.db"
-        self.storage_root = self.test_dir / "storage"
-        self.master_key = secrets.token_bytes(32)
-
-        self.secure_fs = SecureFSWrapper(
-            master_key=self.master_key, db_path=self.db_path, storage_root=self.storage_root
-        )
+        super().setUp()
+        self.secure_fs = self.make_fs()
         self.secure_fs.write("/vault/secret.txt", SECRET)
-
-    def tearDown(self):
-        self.secure_fs.close()
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
 
     def _everything_on_disk(self) -> bytes:
         """Every byte SecureFS persisted: the database plus the storage directory."""
@@ -53,7 +40,7 @@ class TestAtRestConfidentiality(unittest.TestCase):
     def test_wrong_master_key_cannot_decrypt(self):
         """Holding the database and the files, but the wrong key, yields nothing."""
         attacker_fs = SecureFSWrapper(
-            master_key=secrets.token_bytes(32),
+            master_key=generate_master_key(),
             db_path=self.db_path,
             storage_root=self.storage_root,
         )
@@ -82,7 +69,7 @@ class TestAtRestConfidentiality(unittest.TestCase):
 
         # Feeding the stored material back through a wrong-key instance fails.
         attacker_fs = SecureFSWrapper(
-            master_key=secrets.token_bytes(32),
+            master_key=generate_master_key(),
             db_path=self.db_path,
             storage_root=self.storage_root,
         )

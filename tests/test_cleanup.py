@@ -1,28 +1,14 @@
 """Tests for cleanup_orphaned_files()."""
 
-import secrets
-import shutil
-import tempfile
 import unittest
-from pathlib import Path
 
-from securefs import SecureFSWrapper
+from tests._helpers import SecureFSTestCase
 
 
-class TestCleanupOrphanedFiles(unittest.TestCase):
+class TestCleanupOrphanedFiles(SecureFSTestCase):
     def setUp(self):
-        self.test_dir = Path(tempfile.mkdtemp())
-        self.storage_root = self.test_dir / "storage"
-        self.secure_fs = SecureFSWrapper(
-            master_key=secrets.token_bytes(32),
-            db_path=self.test_dir / "index.db",
-            storage_root=self.storage_root,
-        )
-
-    def tearDown(self):
-        self.secure_fs.close()
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
+        super().setUp()
+        self.secure_fs = self.make_fs()
 
     def test_removes_tmp_and_bak_leftovers(self):
         """Files left behind by an interrupted write must be removed."""

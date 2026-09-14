@@ -173,7 +173,6 @@ class SecureFSWrapper:
                     kf_nonce BLOB NOT NULL,
                     file_hash TEXT NOT NULL,
                     file_size INTEGER NOT NULL,
-                    dat_filename TEXT NOT NULL UNIQUE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     modified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -202,7 +201,7 @@ class SecureFSWrapper:
             # Store version info
             cursor.execute("""
                 INSERT OR IGNORE INTO system_metadata (key, value)
-                VALUES ('schema_version', '2.0')
+                VALUES ('schema_version', '3.0')
             """)
 
             conn.commit()
@@ -313,14 +312,6 @@ class SecureFSWrapper:
         Using a keyed HMAC (rather than a plain hash of the path) means the
         storage directory alone does not let an attacker confirm guessed paths
         by recomputing their filename.
-
-        This value is stored in the database for convenience/uniqueness, but
-        callers must always recompute it from ``logical_path`` rather than trust
-        the stored column: it is the only thing that binds a database row to a
-        specific file on disk, so a row that was tampered with independently of
-        the master key (e.g. its kf_encrypted/kf_nonce/file_hash copied from
-        another row) must not be able to redirect reads/deletes to that other
-        row's .dat file.
 
         Args:
             logical_path: Logical file path
@@ -434,7 +425,6 @@ class SecureFSWrapper:
             # Encrypt content with KF
             content_encrypted, content_nonce = self._seal(kf, plaintext_bytes)
 
-            dat_filename = self._generate_dat_filename(logical_path)
             dat_path = self._dat_path(logical_path)
 
             # Compute keyed integrity tag (HMAC) of the plaintext
@@ -472,14 +462,13 @@ class SecureFSWrapper:
                         """
                         INSERT INTO files
                         (logical_path, kf_encrypted, kf_nonce, file_hash, file_size,
-                         dat_filename, created_at, modified_at)
-                        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                         created_at, modified_at)
+                        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                         ON CONFLICT(logical_path) DO UPDATE SET
                             kf_encrypted = excluded.kf_encrypted,
                             kf_nonce = excluded.kf_nonce,
                             file_hash = excluded.file_hash,
                             file_size = excluded.file_size,
-                            dat_filename = excluded.dat_filename,
                             modified_at = CURRENT_TIMESTAMP
                     """,
                         (
@@ -488,7 +477,6 @@ class SecureFSWrapper:
                             kf_nonce,
                             content_hash,
                             len(plaintext_bytes),
-                            dat_filename,
                         ),
                     )
 

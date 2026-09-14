@@ -1,35 +1,14 @@
-import secrets
-import shutil
-import tempfile
 import time
-import unittest
-from pathlib import Path
 
-from securefs import SecureFSWrapper
+from tests._helpers import SecureFSTestCase
 
 
-class TestSecureFSWrapperPerformance(unittest.TestCase):
+class TestSecureFSWrapperPerformance(SecureFSTestCase):
     """Test suite for performance-related aspects"""
 
     def setUp(self):
-        """Set up test fixtures"""
-        self.test_dir = Path(tempfile.mkdtemp())
-        self.db_path = self.test_dir / "test_index.db"
-        self.storage_root = self.test_dir / "test_storage"
-        self.master_key = secrets.token_bytes(32)
-
-        self.secure_fs = SecureFSWrapper(
-            master_key=self.master_key,
-            db_path=self.db_path,
-            storage_root=self.storage_root,
-            cache_enabled=True,
-        )
-
-    def tearDown(self):
-        """Clean up after tests"""
-        self.secure_fs.close()
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
+        super().setUp()
+        self.secure_fs = self.make_fs(cache_enabled=True)
 
     def test_cache_improves_read_performance(self):
         """Test that cache improves read performance"""

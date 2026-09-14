@@ -1,31 +1,15 @@
 import secrets
-import shutil
-import tempfile
-import unittest
 from pathlib import Path
 
-from securefs import SecureFSWrapper
+from tests._helpers import SecureFSTestCase
 
 
-class TestSecureFSWrapperEdgeCases(unittest.TestCase):
+class TestSecureFSWrapperEdgeCases(SecureFSTestCase):
     """Test suite for edge cases and special scenarios"""
 
     def setUp(self):
-        """Set up test fixtures"""
-        self.test_dir = Path(tempfile.mkdtemp())
-        self.db_path = self.test_dir / "test_index.db"
-        self.storage_root = self.test_dir / "test_storage"
-        self.master_key = secrets.token_bytes(32)
-
-        self.secure_fs = SecureFSWrapper(
-            master_key=self.master_key, db_path=self.db_path, storage_root=self.storage_root
-        )
-
-    def tearDown(self):
-        """Clean up after tests"""
-        self.secure_fs.close()
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
+        super().setUp()
+        self.secure_fs = self.make_fs()
 
     def test_special_characters_in_path(self):
         """Test paths with special characters"""

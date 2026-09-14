@@ -1,40 +1,17 @@
-import secrets
-import shutil
 import sqlite3
-import tempfile
-import unittest
 from pathlib import Path
 
 from securefs import FileCorruptionError, SecureFSWrapper
+from securefs.utils import generate_master_key
+from tests._helpers import SecureFSTestCase
 
 
-class TestSecureFSWrapperNoEncryption(unittest.TestCase):
+class TestSecureFSWrapperNoEncryption(SecureFSTestCase):
     """Test suite for development mode (encryption disabled)"""
 
     def setUp(self):
-        """Set up test fixtures with encryption disabled"""
-        self.test_dir = Path(tempfile.mkdtemp())
-        self.db_path = self.test_dir / "test_index.db"
-        self.storage_root = self.test_dir / "test_storage"
-        self.master_key = secrets.token_bytes(32)
-
-        # Suppress the encryption warning for tests
-        import warnings
-
-        warnings.filterwarnings("ignore", category=UserWarning)
-
-        self.secure_fs = SecureFSWrapper(
-            master_key=self.master_key,
-            db_path=self.db_path,
-            storage_root=self.storage_root,
-            encryption_enabled=False,  # Development mode
-        )
-
-    def tearDown(self):
-        """Clean up after tests"""
-        self.secure_fs.close()
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
+        super().setUp()
+        self.secure_fs = self.make_fs(encryption_enabled=False)
 
     def test_write_and_read_work_without_encryption(self):
         """Test that basic operations work without encryption"""
@@ -161,7 +138,7 @@ class TestSecureFSWrapperNoEncryption(unittest.TestCase):
 
             # Create instance with encryption disabled
             test_fs = SecureFSWrapper(
-                master_key=secrets.token_bytes(32),
+                master_key=generate_master_key(),
                 db_path=self.test_dir / "warn_test.db",
                 storage_root=self.test_dir / "warn_storage",
                 encryption_enabled=False,

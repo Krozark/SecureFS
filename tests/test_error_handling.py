@@ -1,40 +1,25 @@
 import os
-import secrets
 import shutil
 import sqlite3
-import tempfile
-import unittest
-from pathlib import Path
 
 from securefs import EncryptionError, SecureFSError, SecureFSWrapper
+from securefs.utils import generate_master_key
+from tests._helpers import SecureFSTestCase
 
 
-class TestSecureFSWrapperErrorHandling(unittest.TestCase):
+class TestSecureFSWrapperErrorHandling(SecureFSTestCase):
     """Test suite for error handling"""
 
     def setUp(self):
-        """Set up test fixtures"""
-        self.test_dir = Path(tempfile.mkdtemp())
-        self.db_path = self.test_dir / "test_index.db"
-        self.storage_root = self.test_dir / "test_storage"
-        self.master_key = secrets.token_bytes(32)
-
-        self.secure_fs = SecureFSWrapper(
-            master_key=self.master_key, db_path=self.db_path, storage_root=self.storage_root
-        )
-
-    def tearDown(self):
-        """Clean up after tests"""
-        self.secure_fs.close()
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
+        super().setUp()
+        self.secure_fs = self.make_fs()
 
     def test_read_with_wrong_master_key_raises_encryption_error(self):
         """Test that wrong master key raises EncryptionError"""
         path = "/test/file.txt"
         self.secure_fs.write(path, b"secret")
 
-        wrong_key = secrets.token_bytes(32)
+        wrong_key = generate_master_key()
         wrong_fs = SecureFSWrapper(
             master_key=wrong_key, db_path=self.db_path, storage_root=self.storage_root
         )

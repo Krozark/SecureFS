@@ -1,35 +1,26 @@
 """Tests for keyed (master-key-derived) storage identifiers and integrity tags.
 
-These verify that the metadata database and the storage directory do not leak a
-verifiable fingerprint of either the plaintext content or the logical paths to
-someone who does not hold the master key.
+These verify that neither the storage directory's filenames nor the stored
+integrity tags let someone without the master key confirm a guessed path or a
+guessed content. (Logical paths themselves are stored in the clear in the index
+by design -- only content confidentiality is in scope.)
 """
 
 import hashlib
-import secrets
-import shutil
-import tempfile
 import unittest
 from pathlib import Path
 
-from securefs import SecureFSWrapper
+from securefs import SecureFSError
+from securefs.utils import generate_master_key
+from tests._helpers import SecureFSTestCase
 
 
-class TestKeyedMac(unittest.TestCase):
-    def setUp(self):
-        self.test_dir = Path(tempfile.mkdtemp())
-        self.master_key = secrets.token_bytes(32)
-
-    def tearDown(self):
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
-
+class TestKeyedMac(SecureFSTestCase):
     def _make(self, key, subdir):
+        """Open a wrapper under its own subdirectory, so keys don't share a store."""
         root = self.test_dir / subdir
-        return SecureFSWrapper(
-            master_key=key,
-            db_path=root / "index.db",
-            storage_root=root / "storage",
+        return self.make_fs(
+            master_key=key, db_path=root / "index.db", storage_root=root / "storage"
         )
 
     def test_integrity_tag_is_not_plain_sha256(self):
@@ -45,7 +36,7 @@ class TestKeyedMac(unittest.TestCase):
         """Same content + different keys must yield different integrity tags."""
         content = b"identical content"
         fs1 = self._make(self.master_key, "k1")
-        fs2 = self._make(secrets.token_bytes(32), "k2")
+        fs2 = self._make(generate_master_key(), "k2")
 
         fs1.write("/f.txt", content)
         fs2.write("/f.txt", content)
@@ -55,7 +46,7 @@ class TestKeyedMac(unittest.TestCase):
     def test_dat_filename_depends_on_master_key(self):
         """The same path under different keys must map to different .dat filenames."""
         fs1 = self._make(self.master_key, "p1")
-        fs2 = self._make(secrets.token_bytes(32), "p2")
+        fs2 = self._make(generate_master_key(), "p2")
 
         fs1.write("/same/path.txt", b"x")
         fs2.write("/same/path.txt", b"x")
@@ -84,8 +75,6 @@ class TestKeyedMac(unittest.TestCase):
         data = bytearray(dat.read_bytes())
         data[-1] ^= 0xFF
         dat.write_bytes(data)
-
-        from securefs import SecureFSError
 
         with self.assertRaises(SecureFSError):
             fs.read("/f.txt", bypass_cache=True)
