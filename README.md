@@ -1,6 +1,12 @@
 # SecureFS
 
-A transparent, secure file storage system with encryption.
+SecureFS est une petite librairie Python qui permet de stocker des fichiers de
+façon chiffrée et sécurisée, de manière totalement locale (sans serveur ni
+connexion internet nécessaire). Elle protège le contenu des fichiers avec un
+chiffrement fort, vérifie qu'ils n'ont pas été altérés, et permet de dériver
+la clé de chiffrement directement à partir du mot de passe d'un utilisateur.
+C'est utilisable comme une brique de stockage sécurisé dans une application
+qui a besoin de garder des fichiers confidentiels sur disque.
 
 [![Python Version](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-MIT-green)](LICENSE)
