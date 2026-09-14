@@ -605,12 +605,22 @@ class SecureFSWrapper:
             # Decrypt content with KF
             plaintext_bytes = self._decrypt_file_content(content_encrypted, content_nonce, kf)
 
-            # Verify integrity if enabled
+            # A zero nonce means the corresponding layer was stored unencrypted, so
+            # no AEAD tag authenticated it. That marker is read back from the
+            # database and the .dat file, which an attacker may be able to write
+            # without knowing the master key: they can mark a row as "plaintext",
+            # supply a file key of their choosing, and hand us content they
+            # encrypted themselves. On that path the keyed integrity tag is the
+            # only thing tying the content back to the master key, so it must be
+            # checked even when verification is otherwise turned off.
+            aead_authenticated = self._is_encrypted_nonce(kf_nonce) and self._is_encrypted_nonce(
+                content_nonce
+            )
+            verification_requested = self.verify_integrity and not skip_verification
+
             if (
-                self.verify_integrity
-                and not skip_verification
-                and not self._verify_file_integrity(plaintext_bytes, expected_hash)
-            ):
+                not aead_authenticated or verification_requested
+            ) and not self._verify_file_integrity(plaintext_bytes, expected_hash):
                 raise FileCorruptionError(
                     f"Integrity check failed for {logical_path}: hash mismatch"
                 )
@@ -659,17 +669,22 @@ class SecureFSWrapper:
             dat_filename = self._generate_dat_filename(logical_path)
 
             try:
-                # Delete .dat file first (can still rollback DB if this fails)
-                dat_path = self.storage_root / dat_filename
-                if dat_path.exists():
-                    dat_path.unlink()
-
-                # Delete from database
+                # Commit the metadata removal *before* touching the filesystem.
+                # Unlinking first would destroy the content while leaving a row
+                # that still claims the file exists if the commit then failed
+                # (e.g. "database is locked"), making the entry permanently
+                # unreadable. This order can only leave an orphan .dat file,
+                # which is harmless and is overwritten by the next write to the
+                # same path.
                 cursor.execute("DELETE FROM files WHERE logical_path = ?", (logical_path,))
                 conn.commit()
 
-                # Remove from cache
+                # The file is logically gone from here on: drop it from the cache
+                # before the unlink, so a failure below can't leave stale content
+                # readable in memory.
                 self._cache_discard(logical_path)
+
+                (self.storage_root / dat_filename).unlink(missing_ok=True)
 
                 return True
 

@@ -6,6 +6,10 @@ re-derive it themselves instead of trusting the stored column, otherwise an
 attacker with write access to the SQLite database (but not the master key)
 could redirect a logical path to another file's ciphertext, or make delete()
 remove an unrelated .dat file.
+
+The same adversary must not be able to use the zero-nonce "stored in
+plaintext" marker to downgrade a file out of authenticated encryption and
+hand us content of their choosing.
 """
 
 import secrets
@@ -15,7 +19,9 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from securefs import FileCorruptionError, SecureFSWrapper
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+from securefs import FileCorruptionError, SecureFSError, SecureFSWrapper
 
 
 class TestRowTampering(unittest.TestCase):
@@ -116,6 +122,155 @@ class TestRowTampering(unittest.TestCase):
         # orphaned one merely named by the tampered column.
         self.assertFalse(self.secure_fs.exists("/public/report.txt"))
         self.assertTrue(orphaned_dat_path.exists())
+
+
+class TestPlaintextMarkerDowngrade(unittest.TestCase):
+    """The zero-nonce "stored in plaintext" marker must not be a forgery channel.
+
+    An attacker who can write the database and the storage directory, but does
+    not know the master key, can mark a row as plaintext and supply a file key
+    of their own. Nothing derived from the master key would then authenticate
+    the content -- unless the keyed integrity tag is checked, which is why that
+    check is mandatory whenever AEAD did not authenticate the data.
+    """
+
+    def setUp(self):
+        self.test_dir = Path(tempfile.mkdtemp())
+        self.db_path = self.test_dir / "index.db"
+        self.storage_root = self.test_dir / "storage"
+        self.master_key = secrets.token_bytes(32)
+
+    def tearDown(self):
+        if self.test_dir.exists():
+            shutil.rmtree(self.test_dir)
+
+    def _make(self, **kwargs) -> SecureFSWrapper:
+        return SecureFSWrapper(
+            master_key=self.master_key,
+            db_path=self.db_path,
+            storage_root=self.storage_root,
+            **kwargs,
+        )
+
+    def _forge(self, forged: bytes) -> None:
+        """Replace the single stored file with attacker-chosen content.
+
+        The file key is chosen by the attacker and marked as "plaintext" (zero
+        nonce) so that unwrapping it never involves the master key.
+        """
+        chosen_kf = b"\x00" * 32
+        nonce = secrets.token_bytes(12)
+        encryptor = Cipher(algorithms.AES(chosen_kf), modes.GCM(nonce)).encryptor()
+        ciphertext = encryptor.update(forged) + encryptor.finalize() + encryptor.tag
+
+        dat_path = next(self.storage_root.glob("*.dat"))
+        dat_path.write_bytes(nonce + ciphertext)
+
+        with sqlite3.connect(self.db_path) as conn:
+            conn.execute(
+                "UPDATE files SET kf_encrypted = ?, kf_nonce = ?, file_size = ?",
+                (chosen_kf, b"\x00" * 12, len(forged)),
+            )
+            conn.commit()
+
+    def test_forgery_rejected_when_integrity_checks_are_disabled(self):
+        """verify_integrity=False must not make content forgery possible."""
+        fs = self._make(verify_integrity=False)
+        fs.write("/config/policy.json", b'{"admin": false}')
+        fs.close()
+
+        self._forge(b'{"admin": true}')
+
+        fs = self._make(verify_integrity=False)
+        with self.assertRaises(FileCorruptionError):
+            fs.read("/config/policy.json")
+        fs.close()
+
+    def test_forgery_rejected_when_caller_skips_verification(self):
+        """skip_verification=True must not make content forgery possible either."""
+        fs = self._make()
+        fs.write("/config/policy.json", b'{"admin": false}')
+        fs.close()
+
+        self._forge(b'{"admin": true}')
+
+        fs = self._make()
+        with self.assertRaises(FileCorruptionError):
+            fs.read("/config/policy.json", skip_verification=True)
+        fs.close()
+
+    def test_genuine_plaintext_files_remain_readable(self):
+        """Legitimate unencrypted files must still read back, checks or not.
+
+        Guards against over-correcting: files written in development mode carry
+        a valid integrity tag, so forcing the check must not break them.
+        """
+        fs = self._make(encryption_enabled=False, verify_integrity=False)
+        fs.write("/dev/notes.txt", b"plaintext content")
+        self.assertEqual(fs.read("/dev/notes.txt", bypass_cache=True), b"plaintext content")
+        self.assertEqual(
+            fs.read("/dev/notes.txt", skip_verification=True, bypass_cache=True),
+            b"plaintext content",
+        )
+        fs.close()
+
+
+class TestDeleteOrdering(unittest.TestCase):
+    """delete() must not destroy content before the metadata removal is durable."""
+
+    def setUp(self):
+        self.test_dir = Path(tempfile.mkdtemp())
+        self.secure_fs = SecureFSWrapper(
+            master_key=secrets.token_bytes(32),
+            db_path=self.test_dir / "index.db",
+            storage_root=self.test_dir / "storage",
+        )
+
+    def tearDown(self):
+        self.secure_fs.close()
+        if self.test_dir.exists():
+            shutil.rmtree(self.test_dir)
+
+    def test_failed_commit_leaves_content_readable(self):
+        """If the metadata delete can't commit, the file must survive intact.
+
+        Unlinking before committing would leave a row claiming the file exists
+        while its content is gone -- unrecoverable, and invisible to exists().
+        """
+        from contextlib import contextmanager
+
+        self.secure_fs.write("/important.txt", b"important data")
+
+        class FailingCommitConnection:
+            """Delegates everything except commit(), which fails as if locked."""
+
+            def __init__(self, real):
+                self._real = real
+
+            def __getattr__(self, name):
+                return getattr(self._real, name)
+
+            def commit(self):
+                raise sqlite3.OperationalError("database is locked")
+
+        original = self.secure_fs._get_connection
+
+        @contextmanager
+        def failing_connection():
+            with original() as conn:
+                yield FailingCommitConnection(conn)
+
+        self.secure_fs._get_connection = failing_connection
+        try:
+            with self.assertRaises(SecureFSError):
+                self.secure_fs.delete("/important.txt")
+        finally:
+            self.secure_fs._get_connection = original
+
+        self.assertTrue(self.secure_fs.exists("/important.txt"))
+        self.assertEqual(
+            self.secure_fs.read("/important.txt", bypass_cache=True), b"important data"
+        )
 
 
 if __name__ == "__main__":
