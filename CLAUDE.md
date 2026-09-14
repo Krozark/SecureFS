@@ -91,7 +91,9 @@ examples/           # Usage examples
 
 - **Encryption**: AES-256-GCM with 12-byte random nonces. Per-file keys (KF, 32 bytes)
   encrypted with master key (KM, 32 bytes). GCM provides authenticated encryption (16-byte tag).
-- **Storage**: Each file stored as `<sha256-of-path>.dat` containing `nonce || ciphertext || tag`.
+- **Storage**: Each file stored as `<hmac-sha256-of-path>.dat` containing
+  `nonce || ciphertext || tag`. The filename is keyed by a master-key subkey and is always
+  re-derived via `_dat_path()`, never read back from the database.
 - **Database**: SQLite with WAL mode for concurrency. Tables: `files` (metadata), `system_metadata`.
 - **Thread safety**: All mutating operations protected by `threading.Lock`. This buys
   correctness, not throughput -- and that is deliberate. Measured on a 4-core box:

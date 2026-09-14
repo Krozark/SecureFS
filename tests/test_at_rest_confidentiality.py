@@ -87,7 +87,7 @@ class TestAtRestConfidentiality(unittest.TestCase):
             storage_root=self.storage_root,
         )
         with self.assertRaises(SecureFSError):
-            attacker_fs._decrypt_with_km(kf_encrypted, kf_nonce)
+            attacker_fs._open(attacker_fs._key_wrap, kf_encrypted, kf_nonce, description="file key")
         attacker_fs.close()
 
     def test_encrypted_store_cannot_be_downgraded_to_plaintext(self):

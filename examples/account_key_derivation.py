@@ -51,6 +51,7 @@ with tempfile.TemporaryDirectory() as tmp:
     fs.close()
 
     # --- A wrong password derives a different (unusable) key ---
+    # scrypt is deliberately slow, so derive each key once and compare.
     wrong_key = derive_master_key("some other guess", salt)
     right_key = derive_master_key("correct horse battery staple", salt)
     assert wrong_key != right_key, "different passwords must derive different keys"
