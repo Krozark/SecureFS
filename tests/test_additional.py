@@ -1,35 +1,21 @@
 """Additional tests for SecureFS covering bug fixes, cross-platform behaviour,
 and areas not covered by the original test suite."""
 
-import secrets
-import shutil
 import sqlite3
-import tempfile
 import threading
-import unittest
 from pathlib import Path
 
 from securefs import SecureFSWrapper
+from securefs.utils import generate_master_key
+from tests._helpers import SecureFSTestCase
 
 
-class TestCreatedAtPreservation(unittest.TestCase):
+class TestCreatedAtPreservation(SecureFSTestCase):
     """Verify that created_at is preserved when a file is overwritten."""
 
     def setUp(self):
-        self.test_dir = Path(tempfile.mkdtemp())
-        self.db_path = self.test_dir / "test_index.db"
-        self.storage_root = self.test_dir / "test_storage"
-        self.master_key = secrets.token_bytes(32)
-        self.fs = SecureFSWrapper(
-            master_key=self.master_key,
-            db_path=self.db_path,
-            storage_root=self.storage_root,
-        )
-
-    def tearDown(self):
-        self.fs.close()
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
+        super().setUp()
+        self.fs = self.make_fs()
 
     def test_created_at_preserved_on_overwrite(self):
         """Overwriting a file must not change its created_at timestamp."""
@@ -55,24 +41,12 @@ class TestCreatedAtPreservation(unittest.TestCase):
         self.assertEqual(self.fs.read(path), b"new")
 
 
-class TestDeleteAtomicity(unittest.TestCase):
+class TestDeleteAtomicity(SecureFSTestCase):
     """Tests for the delete ordering fix (file removal before DB commit)."""
 
     def setUp(self):
-        self.test_dir = Path(tempfile.mkdtemp())
-        self.db_path = self.test_dir / "test_index.db"
-        self.storage_root = self.test_dir / "test_storage"
-        self.master_key = secrets.token_bytes(32)
-        self.fs = SecureFSWrapper(
-            master_key=self.master_key,
-            db_path=self.db_path,
-            storage_root=self.storage_root,
-        )
-
-    def tearDown(self):
-        self.fs.close()
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
+        super().setUp()
+        self.fs = self.make_fs()
 
     def test_delete_removes_dat_and_db_entry(self):
         """After delete, both the .dat file and the DB entry should be gone."""
@@ -106,25 +80,12 @@ class TestDeleteAtomicity(unittest.TestCase):
         self.assertFalse(self.fs.exists(path))
 
 
-class TestCacheThreadSafety(unittest.TestCase):
+class TestCacheThreadSafety(SecureFSTestCase):
     """Verify that cache operations are thread-safe."""
 
     def setUp(self):
-        self.test_dir = Path(tempfile.mkdtemp())
-        self.db_path = self.test_dir / "test_index.db"
-        self.storage_root = self.test_dir / "test_storage"
-        self.master_key = secrets.token_bytes(32)
-        self.fs = SecureFSWrapper(
-            master_key=self.master_key,
-            db_path=self.db_path,
-            storage_root=self.storage_root,
-            cache_enabled=True,
-        )
-
-    def tearDown(self):
-        self.fs.close()
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
+        super().setUp()
+        self.fs = self.make_fs(cache_enabled=True)
 
     def test_concurrent_read_and_clear_cache(self):
         """Reading and clearing cache concurrently should not raise."""
@@ -181,24 +142,12 @@ class TestCacheThreadSafety(unittest.TestCase):
         self.assertEqual(errors, [])
 
 
-class TestCrossplatformPaths(unittest.TestCase):
+class TestCrossplatformPaths(SecureFSTestCase):
     """Ensure that the file system handles cross-platform path scenarios."""
 
     def setUp(self):
-        self.test_dir = Path(tempfile.mkdtemp())
-        self.db_path = self.test_dir / "test_index.db"
-        self.storage_root = self.test_dir / "test_storage"
-        self.master_key = secrets.token_bytes(32)
-        self.fs = SecureFSWrapper(
-            master_key=self.master_key,
-            db_path=self.db_path,
-            storage_root=self.storage_root,
-        )
-
-    def tearDown(self):
-        self.fs.close()
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
+        super().setUp()
+        self.fs = self.make_fs()
 
     def test_forward_slashes_in_logical_path(self):
         """Logical paths with forward slashes should work on all platforms."""
@@ -235,18 +184,8 @@ class TestCrossplatformPaths(unittest.TestCase):
             self.assertEqual(f.parent, Path(self.storage_root))
 
 
-class TestCloseAndReopen(unittest.TestCase):
+class TestCloseAndReopen(SecureFSTestCase):
     """Test close/reopen semantics."""
-
-    def setUp(self):
-        self.test_dir = Path(tempfile.mkdtemp())
-        self.db_path = self.test_dir / "test_index.db"
-        self.storage_root = self.test_dir / "test_storage"
-        self.master_key = secrets.token_bytes(32)
-
-    def tearDown(self):
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
 
     def test_data_persists_after_close_and_reopen(self):
         """Data written before close() should be readable after re-instantiation."""
@@ -298,24 +237,12 @@ class TestCloseAndReopen(unittest.TestCase):
         fs.close()
 
 
-class TestEncryptionEdgeCases(unittest.TestCase):
+class TestEncryptionEdgeCases(SecureFSTestCase):
     """Edge cases in encryption/decryption."""
 
     def setUp(self):
-        self.test_dir = Path(tempfile.mkdtemp())
-        self.db_path = self.test_dir / "test_index.db"
-        self.storage_root = self.test_dir / "test_storage"
-        self.master_key = secrets.token_bytes(32)
-        self.fs = SecureFSWrapper(
-            master_key=self.master_key,
-            db_path=self.db_path,
-            storage_root=self.storage_root,
-        )
-
-    def tearDown(self):
-        self.fs.close()
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
+        super().setUp()
+        self.fs = self.make_fs()
 
     def test_single_byte_content(self):
         """A single byte should encrypt and decrypt correctly."""
@@ -354,24 +281,12 @@ class TestEncryptionEdgeCases(unittest.TestCase):
         self.assertNotEqual(kf1, kf2)
 
 
-class TestDatabaseIntegrity(unittest.TestCase):
+class TestDatabaseIntegrity(SecureFSTestCase):
     """Tests for database schema and metadata integrity."""
 
     def setUp(self):
-        self.test_dir = Path(tempfile.mkdtemp())
-        self.db_path = self.test_dir / "test_index.db"
-        self.storage_root = self.test_dir / "test_storage"
-        self.master_key = secrets.token_bytes(32)
-        self.fs = SecureFSWrapper(
-            master_key=self.master_key,
-            db_path=self.db_path,
-            storage_root=self.storage_root,
-        )
-
-    def tearDown(self):
-        self.fs.close()
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
+        super().setUp()
+        self.fs = self.make_fs()
 
     def test_schema_version_stored(self):
         """system_metadata should contain the schema version."""
@@ -380,7 +295,7 @@ class TestDatabaseIntegrity(unittest.TestCase):
             cursor.execute("SELECT value FROM system_metadata WHERE key = 'schema_version'")
             row = cursor.fetchone()
             self.assertIsNotNone(row)
-            self.assertEqual(row[0], "2.0")
+            self.assertEqual(row[0], "3.0")
 
     def test_wal_mode_enabled(self):
         """Database should use WAL journal mode for better concurrency."""
@@ -390,16 +305,19 @@ class TestDatabaseIntegrity(unittest.TestCase):
             mode = cursor.fetchone()[0]
             self.assertEqual(mode.lower(), "wal")
 
-    def test_dat_filename_unique_constraint(self):
-        """dat_filename column should have a UNIQUE constraint."""
+    def test_storage_filename_is_not_stored(self):
+        """The .dat filename must not be persisted anywhere in the index.
+
+        It is a pure function of (master key, logical path). Storing a copy
+        would reintroduce a second, independently tamperable mapping from a row
+        to a file on disk -- exactly what read()/delete() re-derive to avoid.
+        """
         self.fs.write("/file1.txt", b"content1")
 
-        # Verify that the UNIQUE constraint exists by checking table info
         with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT sql FROM sqlite_master WHERE name = 'files'")
-            create_sql = cursor.fetchone()[0]
-            self.assertIn("UNIQUE", create_sql)
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(files)")}
+
+        self.assertNotIn("dat_filename", columns)
 
     def test_indexes_exist(self):
         """Performance indexes should be created."""
@@ -424,15 +342,8 @@ class TestDatabaseIntegrity(unittest.TestCase):
             self.assertEqual(stored_size, 12345)
 
 
-class TestInitValidation(unittest.TestCase):
+class TestInitValidation(SecureFSTestCase):
     """Tests for constructor validation and edge cases."""
-
-    def setUp(self):
-        self.test_dir = Path(tempfile.mkdtemp())
-
-    def tearDown(self):
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
 
     def test_empty_master_key(self):
         """Empty master key should raise ValueError."""
@@ -456,7 +367,7 @@ class TestInitValidation(unittest.TestCase):
         """Nested storage root directories should be created automatically."""
         deep_root = self.test_dir / "a" / "b" / "c" / "storage"
         fs = SecureFSWrapper(
-            master_key=secrets.token_bytes(32),
+            master_key=generate_master_key(),
             db_path=self.test_dir / "db.db",
             storage_root=deep_root,
         )
@@ -467,7 +378,7 @@ class TestInitValidation(unittest.TestCase):
         """Creating multiple instances on the same DB should not corrupt data."""
         db_path = self.test_dir / "db.db"
         storage_root = self.test_dir / "storage"
-        key = secrets.token_bytes(32)
+        key = generate_master_key()
 
         fs1 = SecureFSWrapper(master_key=key, db_path=db_path, storage_root=storage_root)
         fs1.write("/file.txt", b"data")
@@ -483,24 +394,12 @@ class TestInitValidation(unittest.TestCase):
         fs3.close()
 
 
-class TestListFilesEdgeCases(unittest.TestCase):
+class TestListFilesEdgeCases(SecureFSTestCase):
     """Edge cases for list_files."""
 
     def setUp(self):
-        self.test_dir = Path(tempfile.mkdtemp())
-        self.db_path = self.test_dir / "test_index.db"
-        self.storage_root = self.test_dir / "test_storage"
-        self.master_key = secrets.token_bytes(32)
-        self.fs = SecureFSWrapper(
-            master_key=self.master_key,
-            db_path=self.db_path,
-            storage_root=self.storage_root,
-        )
-
-    def tearDown(self):
-        self.fs.close()
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
+        super().setUp()
+        self.fs = self.make_fs()
 
     def test_prefix_with_no_matches(self):
         """list_files with a non-matching prefix should return empty list."""
@@ -525,24 +424,12 @@ class TestListFilesEdgeCases(unittest.TestCase):
         self.assertEqual(len(self.fs.list_files()), 2)
 
 
-class TestVerifyAllFiles(unittest.TestCase):
+class TestVerifyAllFiles(SecureFSTestCase):
     """Tests for verify_all_files method."""
 
     def setUp(self):
-        self.test_dir = Path(tempfile.mkdtemp())
-        self.db_path = self.test_dir / "test_index.db"
-        self.storage_root = self.test_dir / "test_storage"
-        self.master_key = secrets.token_bytes(32)
-        self.fs = SecureFSWrapper(
-            master_key=self.master_key,
-            db_path=self.db_path,
-            storage_root=self.storage_root,
-        )
-
-    def tearDown(self):
-        self.fs.close()
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
+        super().setUp()
+        self.fs = self.make_fs()
 
     def test_empty_system_verification(self):
         """Verifying an empty system should return empty dict."""

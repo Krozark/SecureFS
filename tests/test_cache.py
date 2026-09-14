@@ -1,34 +1,14 @@
-import secrets
-import shutil
-import tempfile
-import unittest
 from pathlib import Path
 
-from securefs import SecureFSWrapper
+from tests._helpers import SecureFSTestCase
 
 
-class TestSecureFSWrapperCache(unittest.TestCase):
+class TestSecureFSWrapperCache(SecureFSTestCase):
     """Test suite for caching functionality"""
 
     def setUp(self):
-        """Set up test fixtures with cache enabled"""
-        self.test_dir = Path(tempfile.mkdtemp())
-        self.db_path = self.test_dir / "test_index.db"
-        self.storage_root = self.test_dir / "test_storage"
-        self.master_key = secrets.token_bytes(32)
-
-        self.secure_fs = SecureFSWrapper(
-            master_key=self.master_key,
-            db_path=self.db_path,
-            storage_root=self.storage_root,
-            cache_enabled=True,
-        )
-
-    def tearDown(self):
-        """Clean up after tests"""
-        self.secure_fs.close()
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
+        super().setUp()
+        self.secure_fs = self.make_fs(cache_enabled=True)
 
     def test_cache_stores_content_after_write(self):
         """Test that cache stores content after write"""
@@ -167,27 +147,11 @@ class TestSecureFSWrapperCache(unittest.TestCase):
         self.assertEqual(result, content2)
 
 
-class TestSecureFSWrapperCacheBounds(unittest.TestCase):
+class TestSecureFSWrapperCacheBounds(SecureFSTestCase):
     """Test suite for the bounded (LRU) cache behavior."""
 
-    def setUp(self):
-        self.test_dir = Path(tempfile.mkdtemp())
-        self.db_path = self.test_dir / "test_index.db"
-        self.storage_root = self.test_dir / "test_storage"
-        self.master_key = secrets.token_bytes(32)
-
-    def tearDown(self):
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
-
     def _make(self, **kwargs):
-        return SecureFSWrapper(
-            master_key=self.master_key,
-            db_path=self.db_path,
-            storage_root=self.storage_root,
-            cache_enabled=True,
-            **kwargs,
-        )
+        return self.make_fs(cache_enabled=True, **kwargs)
 
     def test_invalid_cache_max_bytes_rejected(self):
         """A non-positive cache budget should be rejected."""

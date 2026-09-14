@@ -16,15 +16,37 @@ from pathlib import Path
 from threading import Lock
 
 from cryptography.exceptions import InvalidTag
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 from .exceptions import EncryptionError, FileCorruptionError, SecureFSError
+from .utils import validate_master_key
 
 
 class SecureFSWrapper:
-    """Enhanced transparent wrapper for encrypted file system"""
+    """Transparent encrypted file storage over a directory and a SQLite index.
 
-    _ZERO_NONCE = b"\x00" * 12
+    Content is encrypted with AES-256-GCM under a per-file key, itself stored
+    wrapped under a subkey of the master key, so recovering any content
+    requires the master key. Files are named on disk by a keyed HMAC of their
+    logical path, and that name is always re-derived rather than stored.
+
+    Paths, sizes and timestamps are kept in the clear in the index: only
+    content confidentiality is in scope. See the project README for the full
+    threat model.
+    """
+
+    # AES-GCM parameters. A nonce of all zeros marks data stored unencrypted.
+    _NONCE_LEN = 12
+    _TAG_LEN = 16
+    _ZERO_NONCE = b"\x00" * _NONCE_LEN
+
+    # HKDF "info" labels used to derive independent, single-purpose subkeys from
+    # the master key -- see _derive_subkey().
+    _HKDF_INFO_WRAP = b"securefs-v1-kf-wrap"
+    _HKDF_INFO_PATH = b"securefs-v1-path-mac"
+    _HKDF_INFO_INTEGRITY = b"securefs-v1-integrity-mac"
 
     # Default maximum amount of plaintext kept in the in-memory cache (64 MiB).
     # Prevents unbounded memory growth (a DoS vector) when many/large files are read.
@@ -44,7 +66,9 @@ class SecureFSWrapper:
         Initialize the secure file system
 
         Args:
-            master_key: Master key (KM) - must be 32 bytes (256 bits)
+            master_key: Master key (KM) - must be 32 bytes (256 bits). Never stored
+                as-is: independent subkeys are derived from it via HKDF for each
+                internal purpose (see _derive_subkey).
             db_path: Path to SQLite database
             storage_root: Root directory to store .dat files
             verify_integrity: Enable hash verification on read (default: True)
@@ -58,19 +82,32 @@ class SecureFSWrapper:
             Setting encryption_enabled=False stores data in PLAINTEXT.
             Use only for development/testing, never in production!
         """
-        if len(master_key) != 32:
+        if not validate_master_key(master_key):
             raise ValueError("Master key must be 32 bytes (256 bits)")
 
         if cache_max_bytes <= 0:
             raise ValueError("cache_max_bytes must be positive")
 
-        self.master_key = master_key
+        # Derive independent, single-purpose subkeys from the master key instead
+        # of reusing the same raw key material for AES-GCM and for HMAC. This is
+        # a defense-in-depth measure (NIST SP 800-108 / RFC 5869): a future
+        # weakness found in one use can't leak into the others. Only the derived
+        # subkeys are kept; the master key itself is not retained beyond this.
+        self._key_wrap = self._derive_subkey(master_key, self._HKDF_INFO_WRAP)
+        self._key_path = self._derive_subkey(master_key, self._HKDF_INFO_PATH)
+        self._key_integrity = self._derive_subkey(master_key, self._HKDF_INFO_INTEGRITY)
         self.db_path = Path(db_path)
         self.storage_root = Path(storage_root)
         self.verify_integrity = verify_integrity
         self.cache_enabled = cache_enabled
         self.encryption_enabled = encryption_enabled
         self.cache_max_bytes = cache_max_bytes
+
+        # Development-mode records are stored unencrypted, so no AEAD tag
+        # authenticates them: the keyed integrity tag is then the only thing
+        # tying content back to the master key, and is verified even when the
+        # caller asked to skip verification.
+        self._integrity_check_mandatory = not encryption_enabled
 
         # Warn if encryption is disabled
         if not self.encryption_enabled:
@@ -96,6 +133,26 @@ class SecureFSWrapper:
 
         # Initialize database
         self._init_database()
+
+    @staticmethod
+    def _derive_subkey(master_key: bytes, info: bytes) -> bytes:
+        """Derive a 32-byte subkey from the master key via HKDF-SHA256.
+
+        ``info`` domain-separates each derived subkey so that, even though they
+        all come from the same master key, they are cryptographically
+        independent of one another.
+
+        Args:
+            master_key: The master key (KM) to derive from.
+            info: Purpose-specific label (one of the ``_HKDF_INFO_*`` constants).
+
+        Returns:
+            A 32-byte subkey.
+        """
+        subkey: bytes = HKDF(algorithm=hashes.SHA256(), length=32, salt=None, info=info).derive(
+            master_key
+        )
+        return subkey
 
     @contextmanager
     def _get_connection(self):
@@ -126,7 +183,6 @@ class SecureFSWrapper:
                     kf_nonce BLOB NOT NULL,
                     file_hash TEXT NOT NULL,
                     file_size INTEGER NOT NULL,
-                    dat_filename TEXT NOT NULL UNIQUE,
                     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                     modified_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
                 )
@@ -155,7 +211,7 @@ class SecureFSWrapper:
             # Store version info
             cursor.execute("""
                 INSERT OR IGNORE INTO system_metadata (key, value)
-                VALUES ('schema_version', '2.0')
+                VALUES ('schema_version', '3.0')
             """)
 
             conn.commit()
@@ -173,133 +229,91 @@ class SecureFSWrapper:
         # A nonce of all zeros indicates plaintext storage
         return nonce != self._ZERO_NONCE
 
-    def _encrypt_with_km(self, data: bytes) -> tuple[bytes, bytes]:
-        """
-        Encrypt data with master key (KM) using AES-256-GCM
-        If encryption is disabled, returns data as-is with zero nonce
+    def _seal(self, key: bytes, data: bytes) -> tuple[bytes, bytes]:
+        """Encrypt data with AES-256-GCM under ``key``.
+
+        When encryption is disabled the data is returned untouched, paired with
+        the all-zero nonce that marks it as stored in the clear.
 
         Args:
-            data: Data to encrypt
+            key: 32-byte AES key.
+            data: Plaintext to encrypt.
 
         Returns:
-            Tuple (encrypted_data_with_tag, nonce)
+            Tuple (ciphertext followed by the GCM tag, nonce).
+
+        Raises:
+            EncryptionError: If encryption fails.
         """
         if not self.encryption_enabled:
-            # Return data as-is with a zero nonce to mark as plaintext
             return data, self._ZERO_NONCE
 
         try:
-            nonce = secrets.token_bytes(12)
-            cipher = Cipher(algorithms.AES(self.master_key), modes.GCM(nonce))
-            encryptor = cipher.encryptor()
-
+            nonce = secrets.token_bytes(self._NONCE_LEN)
+            encryptor = Cipher(algorithms.AES(key), modes.GCM(nonce)).encryptor()
             ciphertext = encryptor.update(data) + encryptor.finalize()
-            ciphertext_with_tag = ciphertext + encryptor.tag
-
-            return ciphertext_with_tag, nonce
+            return ciphertext + encryptor.tag, nonce
         except Exception as e:
-            raise EncryptionError(f"Failed to encrypt with master key: {e}") from e
+            raise EncryptionError(f"Failed to encrypt: {e}") from e
 
-    def _decrypt_with_km(self, ciphertext_with_tag: bytes, nonce: bytes) -> bytes:
-        """
-        Decrypt data with master key (KM)
-        Automatically detects if data is encrypted based on nonce
+    def _open(
+        self,
+        key: bytes,
+        sealed: bytes,
+        nonce: bytes,
+        *,
+        description: str,
+        on_invalid_tag: type[SecureFSError] = EncryptionError,
+    ) -> bytes:
+        """Decrypt data sealed by :meth:`_seal`.
+
+        An all-zero nonce marks a value that was stored unencrypted, so nothing
+        authenticated it. That marker comes from the database and the .dat file,
+        which an attacker may be able to write without knowing the master key:
+        they could mark a record as plaintext and supply a key of their own.
+        Running with encryption on, such a record is therefore refused rather
+        than trusted -- it is either that forgery attempt, or development-mode
+        data whose content is sitting in the clear on disk and would be a lie to
+        call protected. Auto-detection remains only in development mode, where
+        unencrypted records are expected.
 
         Args:
-            ciphertext_with_tag: Encrypted data + GCM tag (16 bytes) OR plaintext
-            nonce: Nonce used for encryption (all zeros if plaintext)
+            key: 32-byte AES key.
+            sealed: Ciphertext followed by the GCM tag, or plaintext.
+            nonce: Nonce used to seal, all zeros if stored in the clear.
+            description: What is being opened, used in error messages.
+            on_invalid_tag: Exception raised when the GCM tag doesn't verify.
 
         Returns:
-            Plaintext data
+            The plaintext.
 
         Raises:
-            EncryptionError: If decryption fails (wrong key or corrupted data)
+            EncryptionError: If encryption is enabled and the record is marked
+                as unencrypted, or if decryption fails.
+            on_invalid_tag: If the GCM tag doesn't verify.
         """
-        # Check if this was stored as plaintext (zero nonce)
         if not self._is_encrypted_nonce(nonce):
-            # Return data as-is (it's plaintext)
-            return ciphertext_with_tag
+            if self.encryption_enabled:
+                raise EncryptionError(
+                    f"Refusing to read unencrypted {description} while encryption is "
+                    "enabled: it is not protected on disk. Re-open with "
+                    "encryption_enabled=False to read it, then write it back to an "
+                    "encrypted store."
+                )
+            return sealed
 
-        # Data is encrypted, decrypt it
         try:
-            ciphertext = ciphertext_with_tag[:-16]
-            tag = ciphertext_with_tag[-16:]
-
-            cipher = Cipher(algorithms.AES(self.master_key), modes.GCM(nonce, tag))
-            decryptor = cipher.decryptor()
-
-            result: bytes = decryptor.update(ciphertext) + decryptor.finalize()
+            decryptor = Cipher(
+                algorithms.AES(key), modes.GCM(nonce, sealed[-self._TAG_LEN :])
+            ).decryptor()
+            result: bytes = decryptor.update(sealed[: -self._TAG_LEN]) + decryptor.finalize()
             return result
         except InvalidTag as e:
-            raise EncryptionError(
-                "Decryption failed: Invalid authentication tag (wrong key or corrupted data)"
+            raise on_invalid_tag(
+                f"Failed to authenticate {description}: wrong key or tampering"
             ) from e
         except Exception as e:
-            raise EncryptionError(f"Failed to decrypt with master key: {e}") from e
-
-    def _encrypt_file_content(self, content: bytes, kf: bytes) -> tuple[bytes, bytes]:
-        """
-        Encrypt file content with file key (KF)
-        If encryption is disabled, returns content as-is with zero nonce
-
-        Args:
-            content: Plaintext content
-            kf: File key (32 bytes)
-
-        Returns:
-            Tuple (encrypted_content_with_tag, nonce)
-        """
-        if not self.encryption_enabled:
-            # Return content as-is with a zero nonce to mark as plaintext
-            return content, self._ZERO_NONCE
-
-        try:
-            nonce = secrets.token_bytes(12)
-            cipher = Cipher(algorithms.AES(kf), modes.GCM(nonce))
-            encryptor = cipher.encryptor()
-
-            ciphertext = encryptor.update(content) + encryptor.finalize()
-            ciphertext_with_tag = ciphertext + encryptor.tag
-
-            return ciphertext_with_tag, nonce
-        except Exception as e:
-            raise EncryptionError(f"Failed to encrypt file content: {e}") from e
-
-    def _decrypt_file_content(self, ciphertext_with_tag: bytes, nonce: bytes, kf: bytes) -> bytes:
-        """
-        Decrypt file content with file key (KF)
-        Automatically detects if data is encrypted based on nonce
-
-        Args:
-            ciphertext_with_tag: Encrypted content + tag OR plaintext
-            nonce: Nonce used (all zeros if plaintext)
-            kf: File key (32 bytes)
-
-        Returns:
-            Plaintext content
-
-        Raises:
-            EncryptionError: If decryption fails
-        """
-        # Check if this was stored as plaintext (zero nonce)
-        if not self._is_encrypted_nonce(nonce):
-            # Return data as-is (it's plaintext)
-            return ciphertext_with_tag
-
-        # Data is encrypted, decrypt it
-        try:
-            ciphertext = ciphertext_with_tag[:-16]
-            tag = ciphertext_with_tag[-16:]
-
-            cipher = Cipher(algorithms.AES(kf), modes.GCM(nonce, tag))
-            decryptor = cipher.decryptor()
-
-            result: bytes = decryptor.update(ciphertext) + decryptor.finalize()
-            return result
-        except InvalidTag as e:
-            raise FileCorruptionError("File decryption failed: Data may be corrupted") from e
-        except Exception as e:
-            raise EncryptionError(f"Failed to decrypt file content: {e}") from e
+            raise EncryptionError(f"Failed to decrypt {description}: {e}") from e
 
     def _generate_dat_filename(self, logical_path: str) -> str:
         """
@@ -315,8 +329,25 @@ class SecureFSWrapper:
         Returns:
             .dat filename
         """
-        path_mac = hmac.new(self.master_key, logical_path.encode(), hashlib.sha256).hexdigest()
+        path_mac = hmac.new(self._key_path, logical_path.encode(), hashlib.sha256).hexdigest()
         return f"{path_mac}.dat"
+
+    def _dat_path(self, logical_path: str) -> Path:
+        """Locate the .dat file holding a logical path's content.
+
+        Always derived, never read back from the database: the filename is the
+        only thing binding a row to a file on disk, so a row tampered with
+        independently of the master key (its kf_encrypted/kf_nonce/file_hash
+        copied from another row, say) must not be able to redirect reads or
+        deletes to that other row's file.
+
+        Args:
+            logical_path: Logical file path.
+
+        Returns:
+            Path to the .dat file, which may not exist yet.
+        """
+        return self.storage_root / self._generate_dat_filename(logical_path)
 
     def _compute_integrity_tag(self, content: bytes) -> str:
         """
@@ -333,7 +364,7 @@ class SecureFSWrapper:
         Returns:
             Hexadecimal HMAC-SHA256 string
         """
-        return hmac.new(self.master_key, content, hashlib.sha256).hexdigest()
+        return hmac.new(self._key_integrity, content, hashlib.sha256).hexdigest()
 
     def _verify_file_integrity(self, content: bytes, expected_tag: str) -> bool:
         """
@@ -388,31 +419,36 @@ class SecureFSWrapper:
 
     def write(self, logical_path: str, plaintext_bytes: bytes) -> None:
         """
-        Write an encrypted file (create or update) with atomic transaction
+        Write a file, creating it or replacing its content
+
+        The new content is staged in a temporary file and moved into place, and
+        any previous content is kept aside until the index is committed, so a
+        failed write rolls back to the previous version. A process killed
+        between the move and the commit can still leave the new content on disk
+        with the old key in the index, which reads as corruption; the leftovers
+        are removable with :meth:`cleanup_orphaned_files`.
 
         Args:
             logical_path: Logical path (e.g., /secure/data/image.jpg)
             plaintext_bytes: Plaintext content to encrypt
 
         Raises:
-            SecureFSError: If write operation fails
+            SecureFSError: If the write fails
         """
         with self._lock:
             # Generate file key (KF)
             kf = secrets.token_bytes(32)
 
             # Encrypt content with KF
-            content_encrypted, content_nonce = self._encrypt_file_content(plaintext_bytes, kf)
+            content_encrypted, content_nonce = self._seal(kf, plaintext_bytes)
 
-            # Generate .dat filename
-            dat_filename = self._generate_dat_filename(logical_path)
-            dat_path = self.storage_root / dat_filename
+            dat_path = self._dat_path(logical_path)
 
             # Compute keyed integrity tag (HMAC) of the plaintext
             content_hash = self._compute_integrity_tag(plaintext_bytes)
 
             # Encrypt KF with KM
-            kf_encrypted, kf_nonce = self._encrypt_with_km(kf)
+            kf_encrypted, kf_nonce = self._seal(self._key_wrap, kf)
 
             # Track whether this is an overwrite for proper rollback
             is_overwrite = dat_path.exists()
@@ -443,14 +479,13 @@ class SecureFSWrapper:
                         """
                         INSERT INTO files
                         (logical_path, kf_encrypted, kf_nonce, file_hash, file_size,
-                         dat_filename, created_at, modified_at)
-                        VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+                         created_at, modified_at)
+                        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
                         ON CONFLICT(logical_path) DO UPDATE SET
                             kf_encrypted = excluded.kf_encrypted,
                             kf_nonce = excluded.kf_nonce,
                             file_hash = excluded.file_hash,
                             file_size = excluded.file_size,
-                            dat_filename = excluded.dat_filename,
                             modified_at = CURRENT_TIMESTAMP
                     """,
                         (
@@ -459,7 +494,6 @@ class SecureFSWrapper:
                             kf_nonce,
                             content_hash,
                             len(plaintext_bytes),
-                            dat_filename,
                         ),
                     )
 
@@ -498,7 +532,9 @@ class SecureFSWrapper:
 
         Args:
             logical_path: Logical file path
-            skip_verification: Skip hash verification (faster but less safe)
+            skip_verification: Skip the keyed integrity check (faster but less
+                safe). Ignored in development mode, where nothing else
+                authenticates the content.
             bypass_cache: Ignore the in-memory cache and read straight from disk,
                 without populating the cache. Useful for integrity verification
                 that must inspect the on-disk content.
@@ -507,9 +543,11 @@ class SecureFSWrapper:
             Plaintext content
 
         Raises:
-            FileNotFoundError: If file doesn't exist
-            FileCorruptionError: If integrity check fails
-            EncryptionError: If decryption fails
+            FileNotFoundError: If the path is not in the index, or its .dat
+                file is missing
+            FileCorruptionError: If the content fails to authenticate
+            EncryptionError: If decryption fails, or if the record is marked as
+                stored in the clear while encryption is enabled
         """
         with self._lock:
             # Check cache first (inside lock for thread safety)
@@ -523,7 +561,7 @@ class SecureFSWrapper:
 
                 cursor.execute(
                     """
-                    SELECT kf_encrypted, kf_nonce, dat_filename, file_hash
+                    SELECT kf_encrypted, kf_nonce, file_hash
                     FROM files
                     WHERE logical_path = ?
                 """,
@@ -535,30 +573,39 @@ class SecureFSWrapper:
                 if row is None:
                     raise FileNotFoundError(f"File not found: {logical_path}")
 
-                kf_encrypted, kf_nonce, dat_filename, expected_hash = row
+                kf_encrypted, kf_nonce, expected_hash = row
 
-            # Decrypt KF with KM
-            kf = self._decrypt_with_km(kf_encrypted, kf_nonce)
+            # Unwrap the file key. _open refuses a record marked as unencrypted
+            # when running with encryption on, so this is also what stops a
+            # tampered row from downgrading the read.
+            kf = self._open(
+                self._key_wrap,
+                kf_encrypted,
+                kf_nonce,
+                description=f"file key for {logical_path}",
+            )
 
-            # Read .dat file
-            dat_path = self.storage_root / dat_filename
+            dat_path = self._dat_path(logical_path)
+            try:
+                with dat_path.open("rb") as f:
+                    content_nonce = f.read(self._NONCE_LEN)
+                    content_encrypted = f.read()
+            except FileNotFoundError as e:
+                raise FileNotFoundError(f"Missing .dat file: {dat_path.name}") from e
 
-            if not dat_path.exists():
-                raise FileNotFoundError(f"Missing .dat file: {dat_filename}")
+            plaintext_bytes = self._open(
+                kf,
+                content_encrypted,
+                content_nonce,
+                description=f"entry {logical_path}",
+                on_invalid_tag=FileCorruptionError,
+            )
 
-            with dat_path.open("rb") as f:
-                content_nonce = f.read(12)
-                content_encrypted = f.read()
+            verification_requested = self.verify_integrity and not skip_verification
 
-            # Decrypt content with KF
-            plaintext_bytes = self._decrypt_file_content(content_encrypted, content_nonce, kf)
-
-            # Verify integrity if enabled
             if (
-                self.verify_integrity
-                and not skip_verification
-                and not self._verify_file_integrity(plaintext_bytes, expected_hash)
-            ):
+                self._integrity_check_mandatory or verification_requested
+            ) and not self._verify_file_integrity(plaintext_bytes, expected_hash):
                 raise FileCorruptionError(
                     f"Integrity check failed for {logical_path}: hash mismatch"
                 )
@@ -586,7 +633,12 @@ class SecureFSWrapper:
 
     def delete(self, logical_path: str) -> bool:
         """
-        Delete a file (metadata + .dat file) atomically
+        Delete a file: its metadata row first, then its .dat file
+
+        The metadata removal is committed before the file is unlinked, so an
+        interrupted delete can only leave an unreferenced .dat file behind --
+        never a row pointing at content that is already gone. Clean those up
+        with :meth:`cleanup_orphaned_files`.
 
         Args:
             logical_path: Logical file path
@@ -597,27 +649,25 @@ class SecureFSWrapper:
         with self._lock, self._get_connection() as conn:
             cursor = conn.cursor()
 
-            # Get .dat filename
-            cursor.execute("SELECT dat_filename FROM files WHERE logical_path = ?", (logical_path,))
-            row = cursor.fetchone()
-
-            if row is None:
-                return False
-
-            dat_filename = row[0]
-
             try:
-                # Delete .dat file first (can still rollback DB if this fails)
-                dat_path = self.storage_root / dat_filename
-                if dat_path.exists():
-                    dat_path.unlink()
-
-                # Delete from database
+                # Commit the metadata removal *before* touching the filesystem.
+                # Unlinking first would destroy the content while leaving a row
+                # that still claims the file exists if the commit then failed
+                # (e.g. "database is locked"), making the entry permanently
+                # unreadable. This order can only leave an orphan .dat file,
+                # which is harmless and is overwritten by the next write to the
+                # same path.
                 cursor.execute("DELETE FROM files WHERE logical_path = ?", (logical_path,))
+                if cursor.rowcount == 0:
+                    return False
                 conn.commit()
 
-                # Remove from cache
+                # The file is logically gone from here on: drop it from the cache
+                # before the unlink, so a failure below can't leave stale content
+                # readable in memory.
                 self._cache_discard(logical_path)
+
+                self._dat_path(logical_path).unlink(missing_ok=True)
 
                 return True
 
@@ -690,10 +740,14 @@ class SecureFSWrapper:
 
     def verify_all_files(self) -> dict[str, bool]:
         """
-        Verify integrity of all files in the system
+        Verify that every indexed file still reads back
 
         Returns:
-            Dictionary mapping paths to verification status (True = OK, False = corrupted)
+            Dictionary mapping each path to whether it verified.
+
+        Raises:
+            Exception: Anything other than a storage-level failure propagates,
+                rather than being reported as a file that did not verify.
         """
         results = {}
 
@@ -703,12 +757,72 @@ class SecureFSWrapper:
                 # content is actually re-read and checked (not a stale cache hit).
                 self.read(path, skip_verification=False, bypass_cache=True)
                 results[path] = True
-            except FileCorruptionError:
-                results[path] = False
-            except Exception:
+            except (SecureFSError, OSError):
+                # A failed tag, a missing or unreadable .dat, a refused
+                # unencrypted record: this path does not verify. Anything else
+                # is a bug in SecureFS, and is left to surface instead of being
+                # quietly reported as corrupted data.
                 results[path] = False
 
         return results
+
+    def cleanup_orphaned_files(self, include_orphaned_data: bool = False) -> dict[str, int]:
+        """Remove leftover files in the storage directory that nothing references.
+
+        A crash or a failed write can leave a ``.tmp`` file (a half-written new
+        version) or a ``.bak`` file (the previous version, moved aside) behind.
+        Neither is ever referenced by the index once the write is over, so both
+        are always safe to remove.
+
+        Orphaned ``.dat`` files -- ones no index entry points to -- are dead
+        ciphertext: the file key needed to decrypt them lived in the row that is
+        now gone, so nobody can ever read them again. They are still only removed
+        when ``include_orphaned_data`` is set, so that pointing the wrapper at the
+        wrong database cannot quietly delete live data.
+
+        Args:
+            include_orphaned_data: Also remove .dat files with no index entry.
+
+        Returns:
+            How many files were removed per extension, e.g.
+            ``{"tmp": 2, "bak": 1, "dat": 0}``.
+
+        Raises:
+            SecureFSError: If a file could not be removed.
+        """
+        removed = {"tmp": 0, "bak": 0, "dat": 0}
+
+        # Hold the lock so a concurrent write() can't have its in-flight .tmp or
+        # .bak deleted from under it.
+        with self._lock:
+            referenced = (
+                {self._generate_dat_filename(path) for path in self.list_files()}
+                if include_orphaned_data
+                else set()
+            )
+
+            try:
+                # Test the name before stat()ing: in the common call only .tmp and
+                # .bak can match, so the whole store need not be stat'ed while the
+                # lock is held.
+                with os.scandir(self.storage_root) as entries:
+                    for entry in entries:
+                        suffix = Path(entry.name).suffix.removeprefix(".")
+                        if suffix not in removed:
+                            continue
+                        if suffix == "dat" and (
+                            not include_orphaned_data or entry.name in referenced
+                        ):
+                            continue
+                        if not entry.is_file():
+                            continue
+
+                        Path(entry.path).unlink(missing_ok=True)
+                        removed[suffix] += 1
+            except OSError as e:
+                raise SecureFSError(f"Failed to clean up storage directory: {e}") from e
+
+        return removed
 
     def get_statistics(self) -> dict:
         """
@@ -726,15 +840,20 @@ class SecureFSWrapper:
             )
             count, total_size, oldest, newest = cursor.fetchone()
 
-            return {
-                "total_files": count or 0,
-                "total_size_bytes": total_size,
-                "oldest_file": oldest,
-                "newest_modification": newest,
-                "cache_enabled": self.cache_enabled,
-                "cache_entries": len(self._cache) if self.cache_enabled else 0,
-                "encryption_enabled": self.encryption_enabled,
-            }
+        # Read the cache under the lock, like every other cache accessor. Taken
+        # after the database work so the lock isn't held across any I/O.
+        with self._lock:
+            cache_entries = len(self._cache) if self.cache_enabled else 0
+
+        return {
+            "total_files": count,
+            "total_size_bytes": total_size,
+            "oldest_file": oldest,
+            "newest_modification": newest,
+            "cache_enabled": self.cache_enabled,
+            "cache_entries": cache_entries,
+            "encryption_enabled": self.encryption_enabled,
+        }
 
     def clear_cache(self, path: str | None = None):
         """
@@ -791,5 +910,11 @@ class SecureFSWrapper:
             return list(self._cache.keys())
 
     def close(self):
-        """Clean up resources"""
+        """Drop cached plaintext.
+
+        There is nothing else to release: database connections live only for
+        the length of one operation. Note that Python cannot reliably wipe the
+        derived subkeys from memory, so closing is not a substitute for ending
+        the process when handling sensitive material.
+        """
         self.clear_cache()

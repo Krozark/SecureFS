@@ -1,37 +1,18 @@
 import contextlib
-import secrets
-import shutil
 import sqlite3
-import tempfile
-import unittest
 from pathlib import Path
 
 from securefs import EncryptionError, FileCorruptionError, SecureFSWrapper
+from securefs.utils import generate_master_key
+from tests._helpers import SecureFSTestCase
 
 
-class TestSecureFSWrapperBasic(unittest.TestCase):
+class TestSecureFSWrapperBasic(SecureFSTestCase):
     """Test suite for basic SecureFSWrapper functionality"""
 
     def setUp(self):
-        """Set up test fixtures before each test"""
-        self.test_dir = Path(tempfile.mkdtemp())
-        self.db_path = self.test_dir / "test_index.db"
-        self.storage_root = self.test_dir / "test_storage"
-        self.master_key = secrets.token_bytes(32)
-
-        self.secure_fs = SecureFSWrapper(
-            master_key=self.master_key,
-            db_path=self.db_path,
-            storage_root=self.storage_root,
-            verify_integrity=True,
-            cache_enabled=False,
-        )
-
-    def tearDown(self):
-        """Clean up after each test"""
-        self.secure_fs.close()
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
+        super().setUp()
+        self.secure_fs = self.make_fs(verify_integrity=True, cache_enabled=False)
 
     # ========================
     # Initialization Tests
@@ -458,7 +439,7 @@ class TestSecureFSWrapperBasic(unittest.TestCase):
         with dat_files[0].open("rb") as f:
             ciphertext1 = f.read()
 
-        new_key = secrets.token_bytes(32)
+        new_key = generate_master_key()
         new_db = self.test_dir / "new_index.db"
         new_storage = self.test_dir / "new_storage"
 
@@ -479,7 +460,7 @@ class TestSecureFSWrapperBasic(unittest.TestCase):
 
         self.secure_fs.write(path, content)
 
-        wrong_key = secrets.token_bytes(32)
+        wrong_key = generate_master_key()
         secure_fs_wrong = SecureFSWrapper(
             master_key=wrong_key, db_path=self.db_path, storage_root=self.storage_root
         )

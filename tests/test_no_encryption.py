@@ -1,40 +1,17 @@
-import secrets
-import shutil
 import sqlite3
-import tempfile
-import unittest
 from pathlib import Path
 
 from securefs import FileCorruptionError, SecureFSWrapper
+from securefs.utils import generate_master_key
+from tests._helpers import ZERO_NONCE, SecureFSTestCase
 
 
-class TestSecureFSWrapperNoEncryption(unittest.TestCase):
+class TestSecureFSWrapperNoEncryption(SecureFSTestCase):
     """Test suite for development mode (encryption disabled)"""
 
     def setUp(self):
-        """Set up test fixtures with encryption disabled"""
-        self.test_dir = Path(tempfile.mkdtemp())
-        self.db_path = self.test_dir / "test_index.db"
-        self.storage_root = self.test_dir / "test_storage"
-        self.master_key = secrets.token_bytes(32)
-
-        # Suppress the encryption warning for tests
-        import warnings
-
-        warnings.filterwarnings("ignore", category=UserWarning)
-
-        self.secure_fs = SecureFSWrapper(
-            master_key=self.master_key,
-            db_path=self.db_path,
-            storage_root=self.storage_root,
-            encryption_enabled=False,  # Development mode
-        )
-
-    def tearDown(self):
-        """Clean up after tests"""
-        self.secure_fs.close()
-        if self.test_dir.exists():
-            shutil.rmtree(self.test_dir)
+        super().setUp()
+        self.secure_fs = self.make_fs(encryption_enabled=False)
 
     def test_write_and_read_work_without_encryption(self):
         """Test that basic operations work without encryption"""
@@ -161,7 +138,7 @@ class TestSecureFSWrapperNoEncryption(unittest.TestCase):
 
             # Create instance with encryption disabled
             test_fs = SecureFSWrapper(
-                master_key=secrets.token_bytes(32),
+                master_key=generate_master_key(),
                 db_path=self.test_dir / "warn_test.db",
                 storage_root=self.test_dir / "warn_storage",
                 encryption_enabled=False,
@@ -223,12 +200,34 @@ class TestSecureFSWrapperNoEncryption(unittest.TestCase):
             encryption_enabled=True,  # Now encryption is ON
         )
 
-        # Should still be able to read old plaintext files
-        result1 = encrypted_fs.read(path1)
-        result2 = encrypted_fs.read(path2)
+        # The old files are still sitting in the clear on disk, so an encrypted
+        # instance must refuse them instead of passing them off as protected.
+        from securefs import EncryptionError
 
-        self.assertEqual(result1, b"This was stored without encryption")
-        self.assertEqual(result2, b"Also plaintext")
+        with self.assertRaises(EncryptionError):
+            encrypted_fs.read(path1)
+        with self.assertRaises(EncryptionError):
+            encrypted_fs.read(path2)
+
+        # Migrating them means reading in development mode and writing back
+        # through the encrypted instance.
+        plaintext_fs = SecureFSWrapper(
+            master_key=self.master_key,
+            db_path=self.db_path,
+            storage_root=self.storage_root,
+            encryption_enabled=False,
+        )
+        recovered1 = plaintext_fs.read(path1, bypass_cache=True)
+        recovered2 = plaintext_fs.read(path2, bypass_cache=True)
+        plaintext_fs.close()
+
+        self.assertEqual(recovered1, b"This was stored without encryption")
+        self.assertEqual(recovered2, b"Also plaintext")
+
+        encrypted_fs.write(path1, recovered1)
+        encrypted_fs.write(path2, recovered2)
+        self.assertEqual(encrypted_fs.read(path1, bypass_cache=True), recovered1)
+        self.assertEqual(encrypted_fs.read(path2, bypass_cache=True), recovered2)
 
         # Write a new file with encryption enabled
         path3 = "/file_encrypted.txt"
@@ -361,7 +360,7 @@ class TestSecureFSWrapperNoEncryption(unittest.TestCase):
             plain_nonce = cursor.fetchone()[0]
 
         # Plaintext nonce should be all zeros
-        self.assertEqual(plain_nonce, b"\x00" * 12)
+        self.assertEqual(plain_nonce, ZERO_NONCE)
 
         self.secure_fs.close()
 
@@ -382,6 +381,6 @@ class TestSecureFSWrapperNoEncryption(unittest.TestCase):
             enc_nonce = cursor.fetchone()[0]
 
         # Encrypted nonce should NOT be all zeros
-        self.assertNotEqual(enc_nonce, b"\x00" * 12)
+        self.assertNotEqual(enc_nonce, ZERO_NONCE)
 
         encrypted_fs.close()

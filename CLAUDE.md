@@ -7,6 +7,10 @@ with SQLite metadata storage, integrity verification, thread-safe operations, an
 optional caching. It uses a two-level encryption architecture: a master key (KM)
 encrypts per-file keys (KF), which in turn encrypt file contents.
 
+The guarantee it exists to provide: with the index and the whole storage directory but
+no master key, no file content is recoverable. Paths, sizes and timestamps are in the
+clear by design -- only content confidentiality is in scope.
+
 ## Build & Setup
 
 ```bash
@@ -82,18 +86,46 @@ securefs/           # Main package
   __version__.py    # Version metadata
   core.py           # SecureFSWrapper - main class
   exceptions.py     # SecureFSError, FileCorruptionError, EncryptionError
-  utils.py          # generate_master_key, compute_hash, format_size, validate_master_key
+  utils.py          # generate_master_key, derive_master_key, generate_salt,
+                    # format_size, validate_master_key
+  py.typed          # marks the package as shipping type hints
 tests/              # Test suite (unittest + pytest)
+  _helpers.py       # SecureFSTestCase: temp store, master key, make_fs() factory
 examples/           # Usage examples
 ```
 
 ## Architecture Notes
 
-- **Encryption**: AES-256-GCM with 12-byte random nonces. Per-file keys (KF, 32 bytes)
-  encrypted with master key (KM, 32 bytes). GCM provides authenticated encryption (16-byte tag).
-- **Storage**: Each file stored as `<sha256-of-path>.dat` containing `nonce || ciphertext || tag`.
+- **Encryption**: AES-256-GCM with 12-byte random nonces (16-byte tag). A fresh per-file
+  key (KF, 32 bytes) per write, wrapped under a subkey of the master key. The master key
+  is never used directly: `_derive_subkey()` derives three independent HKDF subkeys
+  (`_key_wrap`, `_key_path`, `_key_integrity`) so one use can't affect another, and the
+  master key itself is not retained past `__init__`.
+- **Sealing**: one `_seal()`/`_open()` pair does all AES-GCM work; `_open()` is also where
+  an unencrypted record is refused when `encryption_enabled=True`, so the rule holds for
+  every caller rather than at one call site.
+- **Storage**: Each file stored as `<hmac-sha256-of-path>.dat` containing
+  `nonce || ciphertext || tag`. The filename is keyed by a master-key subkey and derived on
+  every access via `_dat_path()`. It is deliberately not persisted: a stored copy would be
+  a second, independently tamperable mapping from a row to a file on disk.
 - **Database**: SQLite with WAL mode for concurrency. Tables: `files` (metadata), `system_metadata`.
-- **Thread safety**: All mutating operations protected by `threading.Lock`.
-- **Plaintext mode**: Detected via all-zero nonce. Supports mixed encrypted/plaintext storage.
+- **Thread safety**: All mutating operations protected by `threading.Lock`. This buys
+  correctness, not throughput -- and that is deliberate. Measured on a 4-core box:
+  AES-GCM decryption does not release the GIL (4 threads run at 0.17x of sequential),
+  and dropping the lock makes concurrent reads *slower* (0.52x) than keeping it (1.06x).
+  A readers-writer lock would be strictly worse than the current design; don't add one.
+- **Where read() time goes** (4 KiB file, measured): SQLite connect + query 55%, AES and
+  Python overhead 41%, file I/O 3%, integrity HMAC 1%. The one real optimization left is
+  reusing a per-thread SQLite connection instead of opening one per operation, worth ~3x
+  on reads (0.45 ms -> 0.15 ms). Deliberately not done: per-operation connections keep
+  every call fully isolated, which is worth more here than the speed.
+- **Plaintext mode**: Marked by an all-zero nonce, and only honored when
+  `encryption_enabled=False`. An encrypted instance refuses such entries, so it never
+  serves content that is unprotected on disk; migrating legacy plaintext is explicit.
+  Because nothing AEAD-authenticates those entries, their keyed integrity tag is always
+  verified, even when `verify_integrity`/`skip_verification` would skip it.
+- **Housekeeping**: `cleanup_orphaned_files()` removes `.tmp`/`.bak` leftovers from
+  interrupted writes; unreferenced `.dat` files (dead ciphertext, their key gone with the
+  row) only under `include_orphaned_data=True`.
 - **Cross-platform**: Designed to run on Windows, Linux, and macOS. Uses `pathlib` and
   `os.path` for path handling. Avoids platform-specific APIs.
