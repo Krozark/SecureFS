@@ -70,10 +70,6 @@ Homepage = "https://github.com/Krozark/SecureFS"
 Repository = "https://github.com/Krozark/SecureFS"
 Changelog = "https://github.com/Krozark/SecureFS/blob/main/CHANGELOG.md"
 
-[project.scripts]
-# Scripts de ligne de commande (optionnel)
-# securefs-cli = "securefs.cli:main"
-
 # ============================================================================
 # Configuration setuptools
 # ============================================================================

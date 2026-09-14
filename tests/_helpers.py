@@ -1,6 +1,7 @@
 """Shared fixtures for the SecureFS test suite."""
 
 import shutil
+import sqlite3
 import tempfile
 import unittest
 import warnings
@@ -8,6 +9,20 @@ from pathlib import Path
 
 from securefs import SecureFSWrapper
 from securefs.utils import generate_master_key
+
+
+#: The nonce that marks a record as stored in the clear. Tests forging that
+#: marker should use this rather than restating its length.
+ZERO_NONCE = SecureFSWrapper._ZERO_NONCE
+
+
+def index_row(db_path, logical_path: str, *columns: str) -> tuple:
+    """Read columns straight out of the index, bypassing the wrapper."""
+    with sqlite3.connect(db_path) as conn:
+        return conn.execute(
+            f"SELECT {', '.join(columns)} FROM files WHERE logical_path = ?",  # noqa: S608
+            (logical_path,),
+        ).fetchone()
 
 
 class SecureFSTestCase(unittest.TestCase):

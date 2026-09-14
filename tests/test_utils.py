@@ -3,7 +3,6 @@
 import unittest
 
 from securefs.utils import (
-    compute_hash,
     derive_master_key,
     format_size,
     generate_master_key,
@@ -34,40 +33,6 @@ class TestGenerateMasterKey(unittest.TestCase):
         """Successive calls should produce different keys."""
         keys = {generate_master_key() for _ in range(50)}
         self.assertEqual(len(keys), 50)
-
-
-class TestComputeHash(unittest.TestCase):
-    """Tests for compute_hash()."""
-
-    def test_returns_hex_string(self):
-        """Hash should be a 64-character hex string."""
-        result = compute_hash(b"hello")
-        self.assertEqual(len(result), 64)
-        # Should only contain hex characters
-        int(result, 16)
-
-    def test_deterministic(self):
-        """Same input should always produce the same hash."""
-        h1 = compute_hash(b"test data")
-        h2 = compute_hash(b"test data")
-        self.assertEqual(h1, h2)
-
-    def test_different_inputs_different_hashes(self):
-        """Different inputs should produce different hashes."""
-        h1 = compute_hash(b"input1")
-        h2 = compute_hash(b"input2")
-        self.assertNotEqual(h1, h2)
-
-    def test_empty_input(self):
-        """Empty bytes should produce a valid hash."""
-        result = compute_hash(b"")
-        self.assertEqual(len(result), 64)
-
-    def test_known_sha256(self):
-        """Verify against a known SHA-256 value."""
-        # SHA-256 of empty string
-        expected = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
-        self.assertEqual(compute_hash(b""), expected)
 
 
 class TestFormatSize(unittest.TestCase):

@@ -10,7 +10,7 @@ import unittest
 
 from securefs import EncryptionError, SecureFSError, SecureFSWrapper
 from securefs.utils import generate_master_key
-from tests._helpers import SecureFSTestCase
+from tests._helpers import ZERO_NONCE, SecureFSTestCase, index_row
 
 
 SECRET = b"PASSWORD=hunter2; BALANCE=999999"
@@ -57,15 +57,13 @@ class TestAtRestConfidentiality(SecureFSTestCase):
         subkey from the master key, so an attacker reading the row directly
         gets ciphertext, not the file key.
         """
-        with sqlite3.connect(self.db_path) as conn:
-            kf_encrypted, kf_nonce = conn.execute(
-                "SELECT kf_encrypted, kf_nonce FROM files WHERE logical_path = ?",
-                ("/vault/secret.txt",),
-            ).fetchone()
+        kf_encrypted, kf_nonce = index_row(
+            self.db_path, "/vault/secret.txt", "kf_encrypted", "kf_nonce"
+        )
 
         # The wrapped key is not the key, and not the content.
         self.assertNotIn(SECRET, kf_encrypted)
-        self.assertNotEqual(kf_nonce, b"\x00" * 12)  # never marked as plaintext
+        self.assertNotEqual(kf_nonce, ZERO_NONCE)  # never marked as plaintext
 
         # Feeding the stored material back through a wrong-key instance fails.
         attacker_fs = SecureFSWrapper(
@@ -80,7 +78,7 @@ class TestAtRestConfidentiality(SecureFSTestCase):
     def test_encrypted_store_cannot_be_downgraded_to_plaintext(self):
         """Marking a row as plaintext must not turn the store readable."""
         with sqlite3.connect(self.db_path) as conn:
-            conn.execute("UPDATE files SET kf_nonce = ?", (b"\x00" * 12,))
+            conn.execute("UPDATE files SET kf_nonce = ?", (ZERO_NONCE,))
             conn.commit()
 
         with self.assertRaises(EncryptionError):

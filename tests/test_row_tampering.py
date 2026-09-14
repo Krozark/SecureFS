@@ -14,7 +14,7 @@ import unittest
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
 from securefs import EncryptionError, FileCorruptionError, SecureFSError
-from tests._helpers import SecureFSTestCase
+from tests._helpers import ZERO_NONCE, SecureFSTestCase, index_row
 
 
 class TestRowTampering(SecureFSTestCase):
@@ -36,12 +36,16 @@ class TestRowTampering(SecureFSTestCase):
         self.secure_fs.write("/public/report.txt", b"public content")
         self.secure_fs.write("/private/salary.txt", b"CONFIDENTIAL: 999999")
 
+        private = index_row(
+            self.db_path,
+            "/private/salary.txt",
+            "kf_encrypted",
+            "kf_nonce",
+            "file_hash",
+            "file_size",
+        )
+
         with sqlite3.connect(self.db_path) as conn:
-            private = conn.execute(
-                "SELECT kf_encrypted, kf_nonce, file_hash, file_size "
-                "FROM files WHERE logical_path = ?",
-                ("/private/salary.txt",),
-            ).fetchone()
             conn.execute(
                 """
                 UPDATE files
@@ -100,7 +104,7 @@ class TestPlaintextMarkerDowngrade(SecureFSTestCase):
         with sqlite3.connect(self.db_path) as conn:
             conn.execute(
                 "UPDATE files SET kf_encrypted = ?, kf_nonce = ?, file_size = ?",
-                (chosen_kf, b"\x00" * 12, len(forged)),
+                (chosen_kf, ZERO_NONCE, len(forged)),
             )
             conn.commit()
 

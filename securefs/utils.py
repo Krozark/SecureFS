@@ -1,8 +1,9 @@
 """
 Utility functions for SecureFS
 
-Provides helper functions for key generation, hashing, formatting,
-and validation used throughout the SecureFS system.
+Provides helper functions for key derivation, key generation, formatting and
+validation. Content integrity uses a master-key-derived HMAC inside
+SecureFSWrapper, not a helper here.
 """
 
 import hashlib
@@ -92,18 +93,6 @@ def derive_master_key(
         account_secret, salt=salt, n=n, r=r, p=p, dklen=32, maxmem=128 * n * r * p * 2
     )
     return master_key
-
-
-def compute_hash(data: bytes) -> str:
-    """Compute the SHA-256 hash of the given data.
-
-    Args:
-        data: The bytes to hash.
-
-    Returns:
-        Hexadecimal string representation of the SHA-256 digest.
-    """
-    return hashlib.sha256(data).hexdigest()
 
 
 def format_size(size_bytes: int) -> str:

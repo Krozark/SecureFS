@@ -740,10 +740,14 @@ class SecureFSWrapper:
 
     def verify_all_files(self) -> dict[str, bool]:
         """
-        Verify integrity of all files in the system
+        Verify that every indexed file still reads back
 
         Returns:
-            Dictionary mapping paths to verification status (True = OK, False = corrupted)
+            Dictionary mapping each path to whether it verified.
+
+        Raises:
+            Exception: Anything other than a storage-level failure propagates,
+                rather than being reported as a file that did not verify.
         """
         results = {}
 
@@ -753,9 +757,11 @@ class SecureFSWrapper:
                 # content is actually re-read and checked (not a stale cache hit).
                 self.read(path, skip_verification=False, bypass_cache=True)
                 results[path] = True
-            except FileCorruptionError:
-                results[path] = False
-            except Exception:
+            except (SecureFSError, OSError):
+                # A failed tag, a missing or unreadable .dat, a refused
+                # unencrypted record: this path does not verify. Anything else
+                # is a bug in SecureFS, and is left to surface instead of being
+                # quietly reported as corrupted data.
                 results[path] = False
 
         return results

@@ -87,7 +87,8 @@ securefs/           # Main package
   core.py           # SecureFSWrapper - main class
   exceptions.py     # SecureFSError, FileCorruptionError, EncryptionError
   utils.py          # generate_master_key, derive_master_key, generate_salt,
-                    # compute_hash, format_size, validate_master_key
+                    # format_size, validate_master_key
+  py.typed          # marks the package as shipping type hints
 tests/              # Test suite (unittest + pytest)
   _helpers.py       # SecureFSTestCase: temp store, master key, make_fs() factory
 examples/           # Usage examples

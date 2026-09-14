@@ -51,6 +51,8 @@ migration is provided: **stores created before this release cannot be read**.
 ### Removed
 
 - "Migration support" as an advertised feature: no such API existed.
+- `utils.compute_hash()`: unused, and a bare SHA-256 helper is easy to mistake
+  for the integrity mechanism, which is a keyed HMAC.
 
 ## [1.0.0] - 2024-12-04
 

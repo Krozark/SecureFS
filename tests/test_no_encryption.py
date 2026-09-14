@@ -3,7 +3,7 @@ from pathlib import Path
 
 from securefs import FileCorruptionError, SecureFSWrapper
 from securefs.utils import generate_master_key
-from tests._helpers import SecureFSTestCase
+from tests._helpers import ZERO_NONCE, SecureFSTestCase
 
 
 class TestSecureFSWrapperNoEncryption(SecureFSTestCase):
@@ -360,7 +360,7 @@ class TestSecureFSWrapperNoEncryption(SecureFSTestCase):
             plain_nonce = cursor.fetchone()[0]
 
         # Plaintext nonce should be all zeros
-        self.assertEqual(plain_nonce, b"\x00" * 12)
+        self.assertEqual(plain_nonce, ZERO_NONCE)
 
         self.secure_fs.close()
 
@@ -381,6 +381,6 @@ class TestSecureFSWrapperNoEncryption(SecureFSTestCase):
             enc_nonce = cursor.fetchone()[0]
 
         # Encrypted nonce should NOT be all zeros
-        self.assertNotEqual(enc_nonce, b"\x00" * 12)
+        self.assertNotEqual(enc_nonce, ZERO_NONCE)
 
         encrypted_fs.close()
