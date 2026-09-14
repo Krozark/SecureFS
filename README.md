@@ -111,6 +111,19 @@ fs.read("/big.bin")  # lu depuis le disque, mis en cache
 fs.read("/big.bin")  # servi depuis le cache mémoire
 ```
 
+## Concurrence
+
+Le thread-safety de SecureFS garantit la **correction**, pas le débit : les
+opérations sont sérialisées par un verrou, donc plusieurs threads ne liront
+pas plus vite qu'un seul. Ce n'est pas un défaut à corriger, c'est le plafond
+de CPython — le déchiffrement AES-GCM ne relâche pas le GIL, et mesures à
+l'appui, supprimer le verrou rend les lectures concurrentes **deux fois plus
+lentes** plutôt que plus rapides.
+
+Utilisez donc les threads pour ne pas bloquer votre application pendant une
+lecture, jamais pour accélérer un traitement par lots : à volume égal, une
+boucle séquentielle sera au moins aussi rapide.
+
 ## Mode développement (non chiffré)
 
 ```python
